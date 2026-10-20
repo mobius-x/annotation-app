@@ -8,7 +8,8 @@ import chokidar from 'chokidar'
 import chardet from 'chardet'
 import iconv from 'iconv-lite'
 import { channelNames, channelSchemas, type Channel } from '../shared/ipc-contract'
-import type { AnnotatedDocument, FileEntry, OpenedFile, RecoverySnapshot, SaveRequest } from '../shared/model'
+import { parseMarkdownDocument, serializeMarkdownDocument } from '../shared/markdown-format'
+import type { AnnotatedDocument, FileEntry, OpenedFile, RecoverySnapshot, SaveRequest, SavedFile } from '../shared/model'
 
 const currentDir = path.dirname(fileURLToPath(import.meta.url))
 const isDev = !app.isPackaged && Boolean(process.env.ELECTRON_RENDERER_URL)
@@ -87,11 +88,14 @@ function decodeBuffer(buffer: Buffer): Pick<OpenedFile, 'text' | 'encoding' | 'h
 
 async function readDocument(filePath: string): Promise<OpenedFile> {
   if (!isAllowedPath(filePath)) throw new Error('Файл находится вне разрешённой папки.')
-  if (filePath.toLowerCase().endsWith('.annot.json')) {
-    const annotationDocument = JSON.parse(await fs.readFile(filePath, 'utf8')) as { text?: string; document?: { source?: string | null; eol?: string } }
-    if (typeof annotationDocument.text !== 'string') throw new Error('В файле аннотаций отсутствует текст.')
+  if (/\.(annot\.json|annot\.md)$/i.test(filePath)) {
+    const isMarkdown = /\.annot\.md$/i.test(filePath)
+    const annotationDocument = isMarkdown
+      ? parseMarkdownDocument(await fs.readFile(filePath, 'utf8'))
+      : JSON.parse(await fs.readFile(filePath, 'utf8')) as AnnotatedDocument
     const source = annotationDocument.document?.source
-    const basePath = source ? path.resolve(path.dirname(filePath), source) : filePath.replace(/\.annot\.json$/i, '.txt')
+    const basePath = source ? path.resolve(path.dirname(filePath), source) : filePath.replace(/\.annot\.(?:json|md)$/i, '.txt')
+    if (!isMarkdown && typeof annotationDocument.text !== 'string') throw new Error('В файле аннотаций отсутствует текст.')
     return {
       path: source ? basePath : filePath,
       text: annotationDocument.text,
@@ -99,27 +103,42 @@ async function readDocument(filePath: string): Promise<OpenedFile> {
       eol: annotationDocument.document?.eol === 'crlf' ? '\r\n' : annotationDocument.document?.eol === 'cr' ? '\r' : '\n',
       hasBom: false,
       annotationDocument,
+      annotationPath: filePath,
     }
   }
   const bytes = await fs.readFile(filePath)
   const decoded = decodeBuffer(bytes)
   const eol = decoded.text.includes('\r\n') ? '\r\n' : decoded.text.includes('\r') ? '\r' : '\n'
   const text = decoded.text.replace(/\r\n?|\n/g, '\n')
-  let annotationDocument: unknown
-  try {
-    annotationDocument = JSON.parse(await fs.readFile(annotatedPath(filePath), 'utf8'))
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
-  }
+  const jsonPath = annotatedPath(filePath)
+  const markdownPath = annotatedPath(filePath, 'md')
+  const [hasJson, hasMarkdown] = await Promise.all([exists(jsonPath), exists(markdownPath)])
+  if (hasJson && hasMarkdown) throw new Error('Рядом найдены оба формата аннотаций (.annot.json и .annot.md). Откройте нужный файл аннотаций отдельно.')
+  const annotationPath = hasMarkdown ? markdownPath : hasJson ? jsonPath : null
+  const annotationDocument = annotationPath
+    ? hasMarkdown
+      ? parseMarkdownDocument(await fs.readFile(annotationPath, 'utf8'))
+      : JSON.parse(await fs.readFile(annotationPath, 'utf8'))
+    : undefined
   if (annotationDocument && typeof annotationDocument === 'object' && 'text' in annotationDocument && typeof annotationDocument.text === 'string') {
-    return { path: filePath, ...decoded, eol, text: annotationDocument.text, annotationDocument }
+    return { path: filePath, ...decoded, eol, text: annotationDocument.text, annotationDocument, annotationPath }
   }
-  return { path: filePath, ...decoded, eol, text }
+  return { path: filePath, ...decoded, eol, text, annotationPath }
 }
 
-function annotatedPath(filePath: string): string {
+async function exists(filePath: string): Promise<boolean> {
+  try {
+    await fs.access(filePath)
+    return true
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+    throw error
+  }
+}
+
+function annotatedPath(filePath: string, format: 'json' | 'md' = 'json'): string {
   const extension = path.extname(filePath)
-  return `${filePath.slice(0, -extension.length)}.annot.json`
+  return `${filePath.slice(0, -extension.length)}.annot.${format}`
 }
 
 async function listDirectory(directory: string): Promise<FileEntry[]> {
@@ -188,9 +207,10 @@ function recoveryPath(documentPath: string | null): string {
   return path.join(app.getPath('userData'), 'recovery', `${key}.json`)
 }
 
-async function saveDocument(request: SaveRequest): Promise<string | null> {
+async function saveDocument(request: SaveRequest): Promise<SavedFile | null> {
   let target = request.path ? path.resolve(request.path) : null
   if (target && !isAllowedPath(target)) throw new Error('Сохранение вне разрешённой рабочей области запрещено.')
+  const isNewSource = !target
   if (!target) {
     if (!mainWindow) return null
     const result = await dialog.showSaveDialog(mainWindow, {
@@ -203,12 +223,18 @@ async function saveDocument(request: SaveRequest): Promise<string | null> {
   }
   const text = request.text.replace(/\n/g, request.eol)
   let contents: Buffer
+  let savedAnnotationPath: string | null = null
   if (request.document) {
     const document = request.document as unknown as AnnotatedDocument
-    const bytes = Buffer.from(JSON.stringify(document, null, 2), 'utf8')
-    if (!request.path) await atomicWrite(target, Buffer.from(text, 'utf8'))
-    await backupBeforeWrite(annotatedPath(target))
-    await atomicWrite(annotatedPath(target), bytes)
+    savedAnnotationPath = isNewSource
+      ? annotatedPath(target)
+      : request.annotationPath ?? annotatedPath(target)
+    if (isNewSource) await atomicWrite(target, Buffer.from(text, 'utf8'))
+    await backupBeforeWrite(savedAnnotationPath)
+    const bytes = /\.annot\.md$/i.test(savedAnnotationPath)
+      ? Buffer.from(serializeMarkdownDocument(document, request.eol as '\n' | '\r\n' | '\r'), 'utf8')
+      : Buffer.from(JSON.stringify(document, null, 2), 'utf8')
+    await atomicWrite(savedAnnotationPath, bytes)
   } else {
     const encoding = request.encoding === 'utf-16be' ? 'utf16-be' : request.encoding
     if (!iconv.encodingExists(encoding)) throw new Error(`Неизвестная кодировка: ${request.encoding}`)
@@ -222,7 +248,7 @@ async function saveDocument(request: SaveRequest): Promise<string | null> {
     }
     await atomicWrite(target, contents)
   }
-  return target
+  return { path: target, annotationPath: savedAnnotationPath }
 }
 
 function installHandler<K extends Channel>(channel: K, handler: (payload: ReturnType<(typeof channelSchemas)[K]['parse']>) => unknown | Promise<unknown>): void {

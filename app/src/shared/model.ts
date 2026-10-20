@@ -58,10 +58,17 @@ export interface OpenedFile {
   eol: '\n' | '\r\n' | '\r'
   hasBom: boolean
   annotationDocument?: unknown
+  annotationPath?: string | null
+}
+
+export interface SavedFile {
+  path: string
+  annotationPath: string | null
 }
 
 export interface SaveRequest {
   path: string | null
+  annotationPath: string | null
   text: string
   encoding: string
   eol: string

@@ -8,13 +8,14 @@
   import { EditorView, drawSelection, highlightActiveLine, keymap } from '@codemirror/view'
   import MarkdownIt from 'markdown-it'
   import DOMPurify from 'dompurify'
-  import type { Annotation, AnnotatedDocument, FileEntry, OpenedFile, RecoverySnapshot } from '../shared/model'
+  import type { Annotation, AnnotatedDocument, FileEntry, OpenedFile, RecoverySnapshot, SavedFile } from '../shared/model'
   import { annotationField, annotationHistory, setAnnotationRanges } from './editor/annotation-field'
   import { createAnnotatedDocument, parseAnnotatedDocument, restoreAnnotations } from './format/json-format'
 
   let editorHost: HTMLDivElement
   let editor = $state<EditorView>()
   let filePath = $state<string | null>(null)
+  let annotationPath = $state<string | null>(null)
   let text = $state('')
   let encoding = $state('utf-8')
   let eol = $state<'\n' | '\r\n' | '\r'>('\n')
@@ -90,6 +91,7 @@
   function normalizeSource(file: OpenedFile): void {
     revision += 1
     filePath = file.path
+    annotationPath = file.annotationPath ?? null
     text = file.text
     encoding = file.encoding
     eol = file.eol
@@ -177,6 +179,7 @@
       }
     }
     filePath = null
+    annotationPath = null
     text = ''
     annotations = []
     lastSavedDocument = undefined
@@ -193,7 +196,9 @@
 
   async function documentForSave(): Promise<AnnotatedDocument | null> {
     if (!annotations.length && !lastSavedDocument) return null
-    const source = filePath?.split(/[\\/]/).at(-1) ?? null
+    const source = filePath && annotationPath && filePath === annotationPath
+      ? null
+      : filePath?.split(/[\\/]/).at(-1) ?? null
     const sourceEol = eol === '\r\n' ? 'crlf' : eol === '\r' ? 'cr' : 'lf'
     return createAnnotatedDocument(text, annotations, source, lastSavedDocument, sourceEol)
   }
@@ -204,16 +209,18 @@
       const savedFromPath = filePath
       const savedRevision = revision
       const document = await documentForSave()
-      const savedPath = await invoke<string | null>('fs:save', {
+      const savedFile = await invoke<SavedFile | null>('fs:save', {
         path: saveAs ? null : filePath,
+        annotationPath: saveAs ? null : annotationPath,
         text,
         encoding,
         eol,
         hasBom,
         document,
       })
-      if (!savedPath) return
-      filePath = savedPath
+      if (!savedFile) return
+      filePath = savedFile.path
+      annotationPath = savedFile.annotationPath
       lastSavedDocument = document ?? undefined
       dirty = revision !== savedRevision
       status = dirty ? 'Документ изменён во время сохранения' : 'Сохранено'

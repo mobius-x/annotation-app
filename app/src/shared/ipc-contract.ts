@@ -7,6 +7,7 @@ export const channelSchemas = {
   'fs:read': z.object({ path: z.string().min(1) }),
   'fs:save': z.object({
     path: z.string().nullable(),
+    annotationPath: z.string().nullable(),
     text: z.string(),
     encoding: z.string(),
     eol: z.string(),
