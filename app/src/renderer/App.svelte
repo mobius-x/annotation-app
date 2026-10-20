@@ -12,8 +12,31 @@
   import { annotationField, annotationHistory, focusDecorations, focusViewField, setAnnotationRanges, setFocusView } from './editor/annotation-field'
   import { createAnnotatedDocument, parseAnnotatedDocument, restoreAnnotations } from './format/json-format'
 
+  interface DocumentTab {
+    id: string
+    path: string | null
+    annotationPath: string | null
+    text: string
+    encoding: string
+    eol: '\n' | '\r\n' | '\r'
+    hasBom: boolean
+    annotations: Annotation[]
+    selectedId: string | null
+    dirty: boolean
+    status: string
+    focusMode: boolean
+    lastSavedDocument?: AnnotatedDocument
+    revision: number
+    recoveryDigest: string
+    selection: { anchor: number; head: number }
+  }
+
   let editorHost: HTMLDivElement
   let editor = $state<EditorView>()
+  let tabs = $state<DocumentTab[]>([])
+  let activeTabId = $state('')
+  let closeTabId = $state<string | null>(null)
+  let savingTabId: string | null = null
   let filePath = $state<string | null>(null)
   let annotationPath = $state<string | null>(null)
   let text = $state('')
@@ -52,6 +75,7 @@
     { id: 'important', label: 'Важно' },
   ]
   const markdownParser = new MarkdownIt({ html: false, linkify: true, breaks: true })
+  const activeTab = $derived(tabs.find((tab) => tab.id === activeTabId))
 
   const visibleAnnotations = $derived(
     [...annotations]
@@ -87,6 +111,120 @@
   function markDirty(): void {
     revision += 1
     dirty = true
+    captureActiveTab()
+  }
+
+  function captureActiveTab(): void {
+    if (!activeTabId) return
+    const selection = editor?.state.selection.main ?? { anchor: 0, head: 0 }
+    const snapshot: DocumentTab = {
+      id: activeTabId,
+      path: filePath,
+      annotationPath,
+      text,
+      encoding,
+      eol,
+      hasBom,
+      annotations,
+      selectedId,
+      dirty,
+      status,
+      focusMode,
+      lastSavedDocument,
+      revision,
+      recoveryDigest: lastRecoveryDigest,
+      selection: { anchor: selection.anchor, head: selection.head },
+    }
+    tabs = tabs.map((tab) => tab.id === activeTabId ? snapshot : tab)
+  }
+
+  function createCurrentTab(id = `untitled:${crypto.randomUUID()}`): DocumentTab {
+    const selection = editor?.state.selection.main ?? { anchor: 0, head: 0 }
+    return {
+      id,
+      path: filePath,
+      annotationPath,
+      text,
+      encoding,
+      eol,
+      hasBom,
+      annotations,
+      selectedId,
+      dirty,
+      status,
+      focusMode,
+      lastSavedDocument,
+      revision,
+      recoveryDigest: lastRecoveryDigest,
+      selection: { anchor: selection.anchor, head: selection.head },
+    }
+  }
+
+  function activateTab(id: string): void {
+    if (id === activeTabId) return
+    if (savingTabId) {
+      status = 'Дождитесь завершения сохранения текущей вкладки.'
+      return
+    }
+    captureActiveTab()
+    const tab = tabs.find((item) => item.id === id)
+    if (!tab) return
+    activeTabId = id
+    filePath = tab.path
+    annotationPath = tab.annotationPath
+    text = tab.text
+    encoding = tab.encoding
+    eol = tab.eol
+    hasBom = tab.hasBom
+    annotations = tab.annotations
+    selectedId = tab.selectedId
+    dirty = tab.dirty
+    status = tab.status
+    lastSavedDocument = tab.lastSavedDocument
+    revision = tab.revision
+    lastRecoveryDigest = tab.recoveryDigest
+    pendingSelection = { from: 0, to: 0 }
+    noteDraft = ''
+    suppressEditorUpdate = true
+    editor?.dispatch({
+      changes: { from: 0, to: editor.state.doc.length, insert: text },
+      effects: [
+        setAnnotationRanges.of(annotations),
+        setFocusView.of(tab.focusMode),
+        focusCompartment.reconfigure(tab.focusMode
+          ? [
+              EditorState.readOnly.of(true),
+              EditorState.transactionFilter.of((transaction) => transaction.docChanged ? [] : transaction),
+            ]
+          : []),
+    ],
+      selection: {
+        anchor: Math.min(tab.selection.anchor, text.length),
+        head: Math.min(tab.selection.head, text.length),
+      },
+    })
+    focusMode = tab.focusMode
+    suppressEditorUpdate = false
+    editor?.focus()
+  }
+
+  function switchToDocument(file: OpenedFile): void {
+    const existing = tabs.find((tab) => tab.path === file.path && tab.annotationPath === (file.annotationPath ?? null))
+    if (existing) {
+      activateTab(existing.id)
+      return
+    }
+    captureActiveTab()
+    normalizeSource(file)
+    const id = file.annotationPath ? `${file.path}|${file.annotationPath}` : `file:${file.path}`
+    const previous = tabs.find((tab) => tab.id === id)
+    if (previous) {
+      tabs = tabs.map((tab) => tab.id === id ? createCurrentTab(id) : tab)
+    } else {
+      tabs = [...tabs, createCurrentTab(id)]
+    }
+    activeTabId = id
+    captureActiveTab()
   }
 
   function setFocusMode(enabled: boolean): void {
@@ -102,10 +240,18 @@
           : []),
       ],
     })
+    captureActiveTab()
   }
 
   function normalizeSource(file: OpenedFile): void {
     revision += 1
+    focusMode = false
+    editor?.dispatch({
+      effects: [
+        setFocusView.of(false),
+        focusCompartment.reconfigure([]),
+      ],
+    })
     filePath = file.path
     annotationPath = file.annotationPath ?? null
     text = file.text
@@ -146,9 +292,7 @@
         ? await invoke<OpenedFile>('fs:read', { path })
         : await invoke<OpenedFile | null>('dialog:openFile')
       if (!result) return
-      if (dirty && !window.confirm('Текущие изменения не сохранены. Открыть другой файл и отбросить их?')) return
-      if (dirty) await invoke('recovery:delete', { path: filePath })
-      normalizeSource(result)
+      switchToDocument(result)
     } catch (error) {
       status = `Не удалось открыть файл: ${error instanceof Error ? error.message : String(error)}`
     }
@@ -185,29 +329,86 @@
   }
 
   async function newFile(): Promise<void> {
-    if (dirty && !window.confirm('Текущие изменения не сохранены. Создать документ и отбросить их?')) return
-    if (dirty) {
-      try {
-        await invoke('recovery:delete', { path: filePath })
-      } catch (error) {
-        status = `Не удалось удалить снимок восстановления: ${error instanceof Error ? error.message : String(error)}`
-        return
-      }
-    }
+    captureActiveTab()
+    focusMode = false
+    editor?.dispatch({
+      effects: [
+        setFocusView.of(false),
+        focusCompartment.reconfigure([]),
+      ],
+    })
     filePath = null
     annotationPath = null
     text = ''
+    encoding = 'utf-8'
+    eol = '\n'
+    hasBom = false
     annotations = []
     lastSavedDocument = undefined
     revision += 1
     dirty = false
     selectedId = null
     if (editor) {
+      suppressEditorUpdate = true
       editor.dispatch({ changes: { from: 0, to: editor.state.doc.length, insert: '' } })
       syncRanges()
+      suppressEditorUpdate = false
       editor.focus()
     }
     status = 'Новый документ'
+    const tab = createCurrentTab()
+    tabs = [...tabs, tab]
+    activeTabId = tab.id
+  }
+
+  function removeTab(id: string): void {
+    const index = tabs.findIndex((tab) => tab.id === id)
+    if (index < 0) return
+    const wasActive = id === activeTabId
+    const remaining = tabs.filter((tab) => tab.id !== id)
+    if (!remaining.length) {
+      tabs = []
+      activeTabId = ''
+      void newFile()
+      return
+    }
+    tabs = remaining
+    if (wasActive) activateTab(remaining[Math.min(index, remaining.length - 1)]!.id)
+    captureActiveTab()
+  }
+
+  function requestCloseTab(id = activeTabId): void {
+    if (savingTabId) return
+    const tab = tabs.find((item) => item.id === id)
+    if (!tab) return
+    if (tab.dirty) {
+      closeTabId = id
+      return
+    }
+    removeTab(id)
+  }
+
+  async function closeTabChoice(choice: 'save' | 'discard' | 'cancel'): Promise<void> {
+    const id = closeTabId
+    closeTabId = null
+    if (!id || choice === 'cancel') return
+    if (choice === 'save') {
+      if (activeTabId !== id) activateTab(id)
+      await save()
+      captureActiveTab()
+      if (dirty) return
+    } else {
+      const tab = tabs.find((item) => item.id === id)
+      if (tab) {
+        try {
+          await invoke('recovery:delete', { path: tab.path })
+        } catch (error) {
+          status = `Не удалось удалить снимок восстановления: ${error instanceof Error ? error.message : String(error)}`
+          return
+        }
+      }
+    }
+    removeTab(id)
   }
 
   async function documentForSave(): Promise<AnnotatedDocument | null> {
@@ -220,7 +421,9 @@
   }
 
   async function save(saveAs = false): Promise<void> {
+    if (savingTabId) return
     if (!dirty && !saveAs) return
+    savingTabId = activeTabId
     try {
       const savedFromPath = filePath
       const savedRevision = revision
@@ -246,8 +449,11 @@
         if (savedFromPath !== filePath) await invoke('recovery:delete', { path: filePath })
       }
       if (folder) files = await invoke<FileEntry[]>('fs:list', { path: folder })
+      captureActiveTab()
     } catch (error) {
       status = `Ошибка сохранения: ${error instanceof Error ? error.message : String(error)}`
+    } finally {
+      savingTabId = null
     }
   }
 
@@ -339,7 +545,16 @@
     const code = event.code
     const mod = event.ctrlKey && !event.altKey && !event.metaKey
     const typing = (event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLInputElement)
-    if (mod && code === 'KeyS') {
+    if (mod && code === 'KeyW') {
+      event.preventDefault()
+      requestCloseTab()
+    } else if (mod && code === 'Tab') {
+      event.preventDefault()
+      const index = tabs.findIndex((tab) => tab.id === activeTabId)
+      const offset = event.shiftKey ? -1 : 1
+      const next = tabs[(index + offset + tabs.length) % tabs.length]
+      if (next) activateTab(next.id)
+    } else if (mod && code === 'KeyS') {
       event.preventDefault()
       void save(event.shiftKey)
     } else if (mod && code === 'KeyN') {
@@ -489,6 +704,9 @@
       state: EditorState.create({ doc: text, extensions }),
       parent: editorHost,
     })
+    const firstTab = createCurrentTab('untitled:initial')
+    tabs = [firstTab]
+    activeTabId = firstTab.id
     void checkRecovery()
     window.addEventListener('keydown', handleKeydown)
     const unsubscribeOpen = window.annotator.onOpenFile(normalizeSource)
@@ -572,7 +790,26 @@
 
     <main class="editor-column">
       <div class="document-tabs">
-        <div class="document-tab"><span class="file-glyph">≡</span>{filePath?.split(/[\\/]/).at(-1) ?? 'Новый документ'}{#if dirty}<span class="dirty-dot"></span>{/if}</div>
+        <div class="tab-strip" role="tablist" aria-label="Документы">
+          {#each tabs as tab (tab.id)}
+            <div
+              class:active-tab={tab.id === activeTabId}
+              class="document-tab"
+              role="tab"
+              aria-selected={tab.id === activeTabId}
+              title={tab.path ?? 'Новый документ'}
+              tabindex={tab.id === activeTabId ? 0 : -1}
+              onclick={() => activateTab(tab.id)}
+              onkeydown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); activateTab(tab.id) } }}
+              onmousedown={(event) => { if (event.button === 1) { event.preventDefault(); requestCloseTab(tab.id) } }}
+            >
+              {#if tab.annotations.length}<span class="file-glyph" title="Есть аннотации">✳</span>{:else}<span class="file-glyph">≡</span>{/if}
+              <span class="tab-label">{tab.path?.split(/[\\/]/).at(-1) ?? 'Новый документ'}</span>
+              {#if tab.dirty}<span class="dirty-dot" title="Не сохранено"></span>{/if}
+              <button class="tab-close" title="Закрыть вкладку (Ctrl+W)" aria-label="Закрыть {tab.path?.split(/[\\/]/).at(-1) ?? 'Новый документ'}" onclick={(event) => { event.stopPropagation(); requestCloseTab(tab.id) }}>×</button>
+            </div>
+          {/each}
+        </div>
         <span class="tab-spacer"></span>
         <button class="icon-button" title="Переключить проводник" onclick={() => showExplorer = !showExplorer}>◧</button>
         <button class="icon-button" title="Переключить аннотации" onclick={() => showAnnotations = !showAnnotations}>▤</button>
@@ -631,6 +868,21 @@
     {/if}
   </div>
 </div>
+
+{#if closeTabId}
+  {@const closingTab = tabs.find((tab) => tab.id === closeTabId)}
+  <div class="modal-backdrop">
+    <dialog open class="close-dialog" aria-labelledby="close-dialog-title">
+      <h2 id="close-dialog-title">Сохранить изменения?</h2>
+      <p>Документ «{closingTab?.path?.split(/[\\/]/).at(-1) ?? 'Новый документ'}» содержит несохранённые изменения.</p>
+      <div class="close-dialog-actions">
+        <button class="accent-button" onclick={() => void closeTabChoice('save')}>Сохранить</button>
+        <button onclick={() => void closeTabChoice('discard')}>Не сохранять</button>
+        <button onclick={() => void closeTabChoice('cancel')}>Отмена</button>
+      </div>
+    </dialog>
+  </div>
+{/if}
 
 {#snippet TreeEntry(entry: FileEntry, depth: number, expanded: Set<string>, children: Record<string, FileEntry[]>, toggleDirectory: (entry: FileEntry) => void, openFile: (path: string) => void)}
   <div class={`tree-row depth-${Math.min(depth, 6)}`} role="treeitem" aria-selected="false" aria-expanded={entry.kind === 'directory' ? expanded.has(entry.path) : undefined} tabindex="0" onclick={() => entry.kind === 'directory' ? toggleDirectory(entry) : openFile(entry.path)} onkeydown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); entry.kind === 'directory' ? toggleDirectory(entry) : openFile(entry.path) } }}>
