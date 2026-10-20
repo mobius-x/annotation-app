@@ -1,0 +1,586 @@
+<script lang="ts">
+  import { onMount } from 'svelte'
+  import { EditorState, Transaction } from '@codemirror/state'
+  import { history, historyKeymap } from '@codemirror/commands'
+  import { defaultHighlightStyle, indentOnInput, syntaxHighlighting } from '@codemirror/language'
+  import { markdown } from '@codemirror/lang-markdown'
+  import { searchKeymap } from '@codemirror/search'
+  import { EditorView, drawSelection, highlightActiveLine, keymap } from '@codemirror/view'
+  import MarkdownIt from 'markdown-it'
+  import DOMPurify from 'dompurify'
+  import type { Annotation, AnnotatedDocument, FileEntry, OpenedFile, RecoverySnapshot } from '../shared/model'
+  import { annotationField, annotationHistory, setAnnotationRanges } from './editor/annotation-field'
+  import { createAnnotatedDocument, parseAnnotatedDocument, restoreAnnotations } from './format/json-format'
+
+  let editorHost: HTMLDivElement
+  let editor = $state<EditorView>()
+  let filePath = $state<string | null>(null)
+  let text = $state('')
+  let encoding = $state('utf-8')
+  let eol = $state<'\n' | '\r\n' | '\r'>('\n')
+  let hasBom = $state(false)
+  let annotations = $state<Annotation[]>([])
+  let selectedId = $state<string | null>(null)
+  let folder = $state<string | null>(null)
+  let files = $state<FileEntry[]>([])
+  let expanded = $state(new Set<string>())
+  let children = $state<Record<string, FileEntry[]>>({})
+  let dirty = $state(false)
+  let status = $state('Готово')
+  let noteDraft = $state('')
+  let noteType = $state('comment')
+  let query = $state('')
+  let focusMode = $state(false)
+  let showExplorer = $state(true)
+  let showAnnotations = $state(true)
+  let lastSavedDocument: AnnotatedDocument | undefined
+  let suppressEditorUpdate = false
+  let autosaveTimer: ReturnType<typeof setTimeout> | undefined
+  let pendingSelection = $state({ from: 0, to: 0 })
+  let editNoteId = $state<string | null>(null)
+  let revision = 0
+  let lastRecoveryDigest = ''
+
+  const annotationTypes = [
+    { id: 'comment', label: 'Комментарий' },
+    { id: 'note', label: 'Заметка' },
+    { id: 'question', label: 'Вопрос' },
+    { id: 'idea', label: 'Идея' },
+    { id: 'todo', label: 'Задача' },
+    { id: 'important', label: 'Важно' },
+  ]
+  const markdownParser = new MarkdownIt({ html: false, linkify: true, breaks: true })
+
+  const visibleAnnotations = $derived(
+    [...annotations]
+      .filter((annotation) => !query || `${annotation.text} ${annotation.quote} ${annotation.tags.join(' ')}`.toLocaleLowerCase('ru').includes(query.toLocaleLowerCase('ru')))
+      .sort((left, right) => Number(Boolean(left.orphan)) - Number(Boolean(right.orphan)) || left.start - right.start || right.end - left.end),
+  )
+
+  function invoke<T>(channel: Parameters<typeof window.annotator.invoke>[0], payload?: unknown): Promise<T> {
+    return window.annotator.invoke(channel, payload) as Promise<T>
+  }
+
+  function syncRanges(undoable = false): void {
+    if (!editor) return
+    editor.dispatch({
+      effects: setAnnotationRanges.of(annotations),
+      annotations: Transaction.addToHistory.of(undoable),
+    })
+  }
+
+  function rangeUpdate(ranges: Annotation[]): void {
+    const view = editor
+    if (!view) return
+    let changed = false
+    annotations = annotations.map((annotation) => {
+      const range = ranges.find((item) => item.id === annotation.id)
+      if (!range || (annotation.start === range.start && annotation.end === range.end && Boolean(annotation.orphan) === Boolean(range.orphan))) return annotation
+      changed = true
+      return { ...annotation, start: range.start, end: range.end, orphan: range.orphan, quote: range.orphan ? annotation.quote : view.state.doc.sliceString(range.start, range.end) }
+    })
+    if (changed) markDirty()
+  }
+
+  function markDirty(): void {
+    revision += 1
+    dirty = true
+  }
+
+  function normalizeSource(file: OpenedFile): void {
+    revision += 1
+    filePath = file.path
+    text = file.text
+    encoding = file.encoding
+    eol = file.eol
+    hasBom = file.hasBom
+    annotations = []
+    lastSavedDocument = undefined
+    pendingSelection = { from: 0, to: 0 }
+    let loadMessage = file.path.split(/[\\/]/).at(-1) ?? 'Документ открыт'
+    if (file.annotationDocument) {
+      try {
+        const parsed = parseAnnotatedDocument(JSON.stringify(file.annotationDocument))
+        const restored = restoreAnnotations(parsed)
+        annotations = restored.annotations
+        lastSavedDocument = parsed
+        text = parsed.text
+        if (restored.shifted || restored.orphaned) loadMessage = `Привязки восстановлены: сдвинуто ${restored.shifted}, без привязки ${restored.orphaned}`
+      } catch (error) {
+        loadMessage = error instanceof Error ? error.message : String(error)
+      }
+    }
+    dirty = false
+    selectedId = null
+    if (editor) {
+      suppressEditorUpdate = true
+      editor.dispatch({ changes: { from: 0, to: editor.state.doc.length, insert: text } })
+      syncRanges()
+      suppressEditorUpdate = false
+      editor.focus()
+    }
+    status = loadMessage
+  }
+
+  async function openFile(path?: string): Promise<void> {
+    try {
+      const result = path
+        ? await invoke<OpenedFile>('fs:read', { path })
+        : await invoke<OpenedFile | null>('dialog:openFile')
+      if (!result) return
+      if (dirty && !window.confirm('Текущие изменения не сохранены. Открыть другой файл и отбросить их?')) return
+      if (dirty) await invoke('recovery:delete', { path: filePath })
+      normalizeSource(result)
+    } catch (error) {
+      status = `Не удалось открыть файл: ${error instanceof Error ? error.message : String(error)}`
+    }
+  }
+
+  async function openFolder(): Promise<void> {
+    try {
+      const result = await invoke<{ path: string; entries: FileEntry[] } | null>('dialog:openFolder')
+      if (!result) return
+      folder = result.path
+      files = result.entries
+      children = {}
+      expanded = new Set()
+      status = `Рабочая папка: ${result.path}`
+    } catch (error) {
+      status = `Не удалось открыть папку: ${error instanceof Error ? error.message : String(error)}`
+    }
+  }
+
+  async function toggleDirectory(entry: FileEntry): Promise<void> {
+    const next = new Set(expanded)
+    if (next.has(entry.path)) {
+      next.delete(entry.path)
+      expanded = next
+      return
+    }
+    try {
+      children[entry.path] = await invoke<FileEntry[]>('fs:list', { path: entry.path })
+      next.add(entry.path)
+      expanded = next
+    } catch (error) {
+      status = `Не удалось прочитать папку: ${error instanceof Error ? error.message : String(error)}`
+    }
+  }
+
+  async function newFile(): Promise<void> {
+    if (dirty && !window.confirm('Текущие изменения не сохранены. Создать документ и отбросить их?')) return
+    if (dirty) {
+      try {
+        await invoke('recovery:delete', { path: filePath })
+      } catch (error) {
+        status = `Не удалось удалить снимок восстановления: ${error instanceof Error ? error.message : String(error)}`
+        return
+      }
+    }
+    filePath = null
+    text = ''
+    annotations = []
+    lastSavedDocument = undefined
+    revision += 1
+    dirty = false
+    selectedId = null
+    if (editor) {
+      editor.dispatch({ changes: { from: 0, to: editor.state.doc.length, insert: '' } })
+      syncRanges()
+      editor.focus()
+    }
+    status = 'Новый документ'
+  }
+
+  async function documentForSave(): Promise<AnnotatedDocument | null> {
+    if (!annotations.length && !lastSavedDocument) return null
+    const source = filePath?.split(/[\\/]/).at(-1) ?? null
+    const sourceEol = eol === '\r\n' ? 'crlf' : eol === '\r' ? 'cr' : 'lf'
+    return createAnnotatedDocument(text, annotations, source, lastSavedDocument, sourceEol)
+  }
+
+  async function save(saveAs = false): Promise<void> {
+    if (!dirty && !saveAs) return
+    try {
+      const savedFromPath = filePath
+      const savedRevision = revision
+      const document = await documentForSave()
+      const savedPath = await invoke<string | null>('fs:save', {
+        path: saveAs ? null : filePath,
+        text,
+        encoding,
+        eol,
+        hasBom,
+        document,
+      })
+      if (!savedPath) return
+      filePath = savedPath
+      lastSavedDocument = document ?? undefined
+      dirty = revision !== savedRevision
+      status = dirty ? 'Документ изменён во время сохранения' : 'Сохранено'
+      if (!dirty) {
+        lastRecoveryDigest = ''
+        await invoke('recovery:delete', { path: savedFromPath })
+        if (savedFromPath !== filePath) await invoke('recovery:delete', { path: filePath })
+      }
+      if (folder) files = await invoke<FileEntry[]>('fs:list', { path: folder })
+    } catch (error) {
+      status = `Ошибка сохранения: ${error instanceof Error ? error.message : String(error)}`
+    }
+  }
+
+  function createAnnotation(): void {
+    if (!editor) return
+    const selection = editor.state.selection.main
+    if (selection.empty) {
+      status = 'Сначала выделите фрагмент текста'
+      editor.focus()
+      return
+    }
+    pendingSelection = { from: selection.from, to: selection.to }
+    noteDraft = ''
+    selectedId = null
+    status = 'Введите заметку и нажмите «Добавить»'
+  }
+
+  function confirmAnnotation(): void {
+    const view = editor
+    if (!view) return
+    const { from, to } = pendingSelection
+    if (from === to) return
+    const now = new Date().toISOString()
+    const quote = view.state.doc.sliceString(from, to)
+    let id: string
+    do {
+      id = `a${Math.random().toString(36).slice(2, 8)}`
+    } while (annotations.some((annotation) => annotation.id === id))
+    annotations = [...annotations, {
+      id,
+      type: noteType,
+      text: noteDraft,
+      start: from,
+      end: to,
+      quote,
+      tags: [],
+      resolved: false,
+      color: null,
+      created: now,
+      modified: now,
+    }]
+    markDirty()
+    syncRanges(true)
+    noteDraft = ''
+    pendingSelection = { from: 0, to: 0 }
+    status = 'Аннотация добавлена'
+  }
+
+  function removeAnnotation(id: string): void {
+    annotations = annotations.filter((annotation) => annotation.id !== id)
+    if (selectedId === id) selectedId = null
+    markDirty()
+    syncRanges(true)
+  }
+
+  function updateAnnotation(id: string, changes: Partial<Annotation>, undoable = false): void {
+    annotations = annotations.map((annotation) => annotation.id === id
+      ? { ...annotation, ...changes, modified: new Date().toISOString() }
+      : annotation)
+    syncRanges(undoable)
+    markDirty()
+  }
+
+  function selectAnnotation(annotation: Annotation): void {
+    selectedId = annotation.id
+    const view = editor
+    if (!view) return
+    if (!annotation.orphan) {
+      view.dispatch({ selection: { anchor: annotation.start, head: annotation.end }, scrollIntoView: true })
+      view.focus()
+    }
+  }
+
+  function moveAnnotation(direction: number): void {
+    const ordered = visibleAnnotations.filter((annotation) => !annotation.orphan)
+    if (!ordered.length) return
+    const index = ordered.findIndex((annotation) => annotation.id === selectedId)
+    const next = ordered[(index + direction + ordered.length) % ordered.length]
+    selectAnnotation(next)
+  }
+
+  function focusNext(): void {
+    const active = document.activeElement
+    if (active && editorHost?.contains(active)) return
+    editor?.focus()
+  }
+
+  function handleKeydown(event: KeyboardEvent): void {
+    const code = event.code
+    const mod = event.ctrlKey && !event.altKey && !event.metaKey
+    const typing = (event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLInputElement)
+    if (mod && code === 'KeyS') {
+      event.preventDefault()
+      void save(event.shiftKey)
+    } else if (mod && code === 'KeyN') {
+      event.preventDefault()
+      void newFile()
+    } else if (mod && code === 'KeyO') {
+      event.preventDefault()
+      void openFile()
+    } else if (mod && code === 'KeyF') {
+      event.preventDefault()
+      document.querySelector<HTMLInputElement>('.search-input')?.focus()
+    } else if (mod && event.shiftKey && code === 'KeyA') {
+      event.preventDefault()
+      createAnnotation()
+    } else if (!typing && event.altKey && code === 'ArrowDown') {
+      event.preventDefault()
+      moveAnnotation(1)
+    } else if (!typing && event.altKey && code === 'ArrowUp') {
+      event.preventDefault()
+      moveAnnotation(-1)
+    } else if (!typing && code === 'F9') {
+      focusMode = !focusMode
+    } else if (mod && code === 'Digit1') {
+      showExplorer = !showExplorer
+    } else if (mod && code === 'Digit3') {
+      showAnnotations = !showAnnotations
+    } else if (event.key === 'Escape' && pendingSelection.from !== pendingSelection.to) {
+      pendingSelection = { from: 0, to: 0 }
+      noteDraft = ''
+    }
+  }
+
+  function renderMarkdown(note: string): string {
+    return DOMPurify.sanitize(markdownParser.render(note), { ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto):|[^a-z]|[a-z+.-]+(?:[^a-z+.-:]|$))/i })
+  }
+
+  function openNoteLink(event: MouseEvent | KeyboardEvent, annotation?: Annotation): void {
+    const anchor = (event.target as HTMLElement).closest('a')
+    if (anchor?.href) {
+      event.preventDefault()
+      void invoke('shell:openExternal', { url: anchor.href })
+    } else if (annotation && event instanceof KeyboardEvent && event.key === 'Enter') {
+      selectAnnotation(annotation)
+    }
+  }
+
+  async function checkRecovery(): Promise<void> {
+    try {
+      const snapshots = await invoke<RecoverySnapshot[]>('recovery:list')
+      if (!snapshots.length) return
+      const snapshot = snapshots.sort((left, right) => right.modified.localeCompare(left.modified))[0]
+      if (!snapshot) return
+      if (!window.confirm(`Найдены несохранённые изменения${snapshot.path ? ` в файле «${snapshot.path.split(/[\\/]/).at(-1)}»` : ''}. Восстановить?`)) {
+        await invoke('recovery:delete', { path: snapshot.path })
+        return
+      }
+      revision += 1
+      filePath = snapshot.path
+      text = snapshot.text
+      annotations = snapshot.annotations
+      dirty = true
+      if (editor) {
+        suppressEditorUpdate = true
+        editor.dispatch({ changes: { from: 0, to: editor.state.doc.length, insert: text } })
+        syncRanges()
+        suppressEditorUpdate = false
+      }
+      status = 'Восстановлен снимок. Сохраните документ, чтобы записать изменения.'
+    } catch (error) {
+      status = `Не удалось проверить восстановление: ${error instanceof Error ? error.message : String(error)}`
+    }
+  }
+
+  onMount(() => {
+    const extensions = [
+      history(),
+      drawSelection(),
+      highlightActiveLine(),
+      indentOnInput(),
+      syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
+      keymap.of([...historyKeymap, ...searchKeymap]),
+      annotationField,
+      annotationHistory,
+      EditorView.lineWrapping,
+      EditorView.cspNonce.of(document.querySelector<HTMLMetaElement>('meta[name="csp-nonce"]')?.content ?? ''),
+      EditorView.updateListener.of((update) => {
+        if (suppressEditorUpdate) return
+        if (update.docChanged) {
+          text = update.state.doc.toString()
+          markDirty()
+          rangeUpdate(update.state.field(annotationField))
+          status = 'Изменения не сохранены'
+        } else if (update.startState.field(annotationField) !== update.state.field(annotationField)) {
+          annotations = update.state.field(annotationField)
+          markDirty()
+          status = 'Изменения не сохранены'
+        }
+      }),
+      EditorView.theme({
+        '&': { height: '100%', color: 'var(--editor-fg)', backgroundColor: 'var(--editor-bg)', fontSize: '16px' },
+        '.cm-content': { fontFamily: 'Cascadia Mono, Consolas, monospace', lineHeight: '1.6', padding: '24px', caretColor: 'var(--editor-fg)' },
+        '.cm-gutters': { backgroundColor: 'var(--editor-bg)', color: 'var(--fg-muted)', border: 'none' },
+        '.cm-activeLine': { backgroundColor: 'color-mix(in srgb, var(--editor-fg) 4%, transparent)' },
+        '.cm-activeLineGutter': { backgroundColor: 'transparent' },
+        '.cm-selectionBackground': { backgroundColor: 'var(--selection) !important' },
+      }),
+    ]
+    editor = new EditorView({
+      state: EditorState.create({ doc: text, extensions }),
+      parent: editorHost,
+    })
+    void checkRecovery()
+    window.addEventListener('keydown', handleKeydown)
+    const unsubscribeOpen = window.annotator.onOpenFile(normalizeSource)
+    const unsubscribeWorkspace = window.annotator.onWorkspaceRefresh(() => {
+      if (folder) void invoke<FileEntry[]>('fs:list', { path: folder }).then((entries) => files = entries).catch((error: unknown) => {
+        status = `Не удалось обновить дерево: ${error instanceof Error ? error.message : String(error)}`
+      })
+    })
+    const recoveryTimer = setInterval(() => {
+      if (!dirty) return
+      const snapshot = JSON.parse(JSON.stringify({
+        path: filePath,
+        text,
+        annotations,
+        modified: new Date().toISOString(),
+      })) as RecoverySnapshot
+      const signature = JSON.stringify(snapshot)
+      if (signature === lastRecoveryDigest) return
+      lastRecoveryDigest = signature
+      void invoke('recovery:save', snapshot).catch((error: unknown) => {
+        status = `Не удалось создать снимок восстановления: ${error instanceof Error ? error.message : String(error)}`
+      })
+    }, 5000)
+    return () => {
+      window.removeEventListener('keydown', handleKeydown)
+      unsubscribeOpen()
+      unsubscribeWorkspace()
+      clearInterval(recoveryTimer)
+      editor?.destroy()
+      if (autosaveTimer) clearTimeout(autosaveTimer)
+    }
+  })
+
+  $effect(() => {
+    const shouldAutosave = dirty && annotations.length > 0 && Boolean(filePath)
+    if (autosaveTimer) clearTimeout(autosaveTimer)
+    if (shouldAutosave) {
+      autosaveTimer = setTimeout(() => void save(), 1500)
+    }
+  })
+</script>
+
+<svelte:head>
+  <title>{filePath?.split(/[\\/]/).at(-1) ?? 'Annotator'}{dirty ? ' •' : ''} — Annotator</title>
+</svelte:head>
+
+<div class:focus-mode={focusMode} class="app-shell">
+  <header class="toolbar">
+    <div class="brand"><span class="brand-mark">A</span><span>Annotator</span></div>
+    <div class="toolbar-group">
+      <button onclick={newFile} title="Новый документ (Ctrl+N)">Новый</button>
+      <button onclick={() => void openFile()} title="Открыть файл (Ctrl+O)">Открыть</button>
+      <button onclick={() => void openFolder()} title="Открыть рабочую папку">Папка</button>
+    </div>
+    <div class="toolbar-group editor-actions">
+      <button class="accent-button" onclick={createAnnotation} title="Создать аннотацию (Ctrl+Shift+A)">＋ Аннотация</button>
+      <button onclick={() => void save()} title="Сохранить (Ctrl+S)">Сохранить</button>
+      <button onclick={() => void save(true)} title="Сохранить как (Ctrl+Shift+S)">Сохранить как…</button>
+    </div>
+    <div class="toolbar-spacer"></div>
+    <button class:active={focusMode} onclick={() => focusMode = !focusMode} title="Режим фокуса (F9)">Фокус</button>
+  </header>
+
+  <div class="workspace">
+    {#if showExplorer && !focusMode}
+      <aside class="explorer pane">
+        <div class="pane-heading"><span>ПРОВОДНИК</span><button class="icon-button" onclick={() => void openFolder()} title="Открыть папку">＋</button></div>
+        {#if folder}
+          <div class="root-label" title={folder}>▾ {folder.split(/[\\/]/).at(-1)}</div>
+          <div class="file-tree" role="tree" aria-label="Файлы рабочей папки">
+            {#each files as entry (entry.path)}
+              {@render TreeEntry(entry, 0, expanded, children, toggleDirectory, openFile)}
+            {/each}
+          </div>
+        {:else}
+          <div class="empty-hint"><span class="empty-icon">⌂</span><p>Откройте папку с документами,<br />чтобы видеть файлы здесь.</p><button onclick={() => void openFolder()}>Открыть папку</button></div>
+        {/if}
+        <div class="explorer-footer"><button onclick={() => void openFile()}>＋ Открыть отдельный файл</button></div>
+      </aside>
+    {/if}
+
+    <main class="editor-column">
+      <div class="document-tabs">
+        <div class="document-tab"><span class="file-glyph">≡</span>{filePath?.split(/[\\/]/).at(-1) ?? 'Новый документ'}{#if dirty}<span class="dirty-dot"></span>{/if}</div>
+        <span class="tab-spacer"></span>
+        <button class="icon-button" title="Переключить проводник" onclick={() => showExplorer = !showExplorer}>◧</button>
+        <button class="icon-button" title="Переключить аннотации" onclick={() => showAnnotations = !showAnnotations}>▤</button>
+      </div>
+      <div class="editor-surface" bind:this={editorHost}></div>
+      <footer class="statusbar">
+        <span>{dirty ? '● Не сохранено' : '✓ Сохранено'}</span>
+        <span>{encoding.toUpperCase()}</span>
+        <span>{eol === '\r\n' ? 'CRLF' : eol === '\r' ? 'CR' : 'LF'}</span>
+        <span>{annotations.length} {annotations.length === 1 ? 'аннотация' : 'аннотаций'}</span>
+        <span class="status-message">{status}</span>
+      </footer>
+    </main>
+
+    {#if showAnnotations && !focusMode}
+      <aside class="annotations pane">
+        <div class="pane-heading"><span>АННОТАЦИИ</span><span class="count-badge">{annotations.length}</span></div>
+        <input class="search-input" bind:value={query} placeholder="Поиск по заметкам и тегам" aria-label="Поиск по аннотациям" />
+        {#if pendingSelection.from !== pendingSelection.to}
+          <section class="note-composer">
+            <div class="composer-title">Новая аннотация</div>
+            <div class="quote-preview">“{editor?.state.doc.sliceString(pendingSelection.from, pendingSelection.to).slice(0, 120)}”</div>
+            <select bind:value={noteType} aria-label="Тип аннотации">
+              {#each annotationTypes as type}<option value={type.id}>{type.label}</option>{/each}
+            </select>
+            <textarea bind:value={noteDraft} rows="4" placeholder="Текст заметки в Markdown…"></textarea>
+            <div class="composer-actions"><button onclick={() => { pendingSelection = { from: 0, to: 0 }; noteDraft = '' }}>Отмена</button><button class="accent-button" onclick={confirmAnnotation}>Добавить</button></div>
+          </section>
+        {/if}
+        <div class="annotation-list" role="listbox" aria-label="Список аннотаций">
+          {#if visibleAnnotations.length === 0}
+            <div class="empty-hint annotation-empty"><span class="empty-icon">✳</span><p>{annotations.length ? 'Совпадений не найдено.' : 'Выделите фрагмент текста и нажмите «＋ Аннотация», чтобы добавить заметку.'}</p></div>
+          {/if}
+          {#each visibleAnnotations as annotation (annotation.id)}
+            <article class:chosen={selectedId === annotation.id} class:orphan={annotation.orphan} class="annotation-card annot-card-{annotation.type}">
+              <div class="card-heading">
+                <span class="type-dot"></span>
+                <select aria-label="Тип аннотации" value={annotation.type} onclick={(event) => event.stopPropagation()} onchange={(event) => updateAnnotation(annotation.id, { type: event.currentTarget.value }, true)}>
+                  {#each annotationTypes as type}<option value={type.id}>{type.label}</option>{/each}
+                </select>
+                <button class="resolve-button" class:resolved={annotation.resolved} title={annotation.resolved ? 'Снова открыть' : 'Отметить решённой'} onclick={(event) => { event.stopPropagation(); updateAnnotation(annotation.id, { resolved: !annotation.resolved }, true) }}>{annotation.resolved ? '✓' : '○'}</button>
+                <button class="delete-button" title="Удалить аннотацию" onclick={(event) => { event.stopPropagation(); removeAnnotation(annotation.id) }}>×</button>
+              </div>
+              <button class="card-main" aria-pressed={selectedId === annotation.id} onclick={() => selectAnnotation(annotation)} ondblclick={() => editNoteId = annotation.id}>
+                <div class="annotation-quote">{annotation.orphan ? 'Без привязки' : `“${annotation.quote.slice(0, 120)}”`}</div>
+              </button>
+              <div class="annotation-rendered" role="button" aria-label="Текст заметки" tabindex="0" onclick={(event) => openNoteLink(event, annotation)} onkeydown={(event) => openNoteLink(event, annotation)}>{@html renderMarkdown(annotation.text || '*Двойной щелчок, чтобы добавить заметку…*')}</div>
+              {#if editNoteId === annotation.id}
+                <textarea class="annotation-body" aria-label="Текст заметки" rows="3" value={annotation.text} oninput={(event) => updateAnnotation(annotation.id, { text: event.currentTarget.value })} onkeydown={(event) => { if (event.key === 'Escape') editNoteId = null }} onblur={() => editNoteId = null} placeholder="Текст заметки в Markdown…"></textarea>
+              {/if}
+              {#if annotation.tags.length}<div class="tag-row">{#each annotation.tags as tag}<span>#{tag}</span>{/each}</div>{/if}
+            </article>
+          {/each}
+        </div>
+      </aside>
+    {/if}
+  </div>
+</div>
+
+{#snippet TreeEntry(entry: FileEntry, depth: number, expanded: Set<string>, children: Record<string, FileEntry[]>, toggleDirectory: (entry: FileEntry) => void, openFile: (path: string) => void)}
+  <div class={`tree-row depth-${Math.min(depth, 6)}`} role="treeitem" aria-selected="false" aria-expanded={entry.kind === 'directory' ? expanded.has(entry.path) : undefined} tabindex="0" onclick={() => entry.kind === 'directory' ? toggleDirectory(entry) : openFile(entry.path)} onkeydown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); entry.kind === 'directory' ? toggleDirectory(entry) : openFile(entry.path) } }}>
+    <span class="tree-chevron">{entry.kind === 'directory' ? expanded.has(entry.path) ? '▾' : '▸' : ''}</span>
+    <span class="tree-icon">{entry.kind === 'directory' ? expanded.has(entry.path) ? '▾' : '▸' : entry.name.toLowerCase().endsWith('.md') ? '¶' : '≡'}</span>
+    <span class="tree-name">{entry.name.replace(/\.annot\.(json|md)$/i, '')}</span>
+    {#if entry.annotated}<span class="tree-annotated" title="Есть аннотации">✳</span>{/if}
+  </div>
+  {#if entry.kind === 'directory' && expanded.has(entry.path)}
+    {#each children[entry.path] ?? [] as child (child.path)}
+      {@render TreeEntry(child, depth + 1, expanded, children, toggleDirectory, openFile)}
+    {/each}
+  {/if}
+{/snippet}
