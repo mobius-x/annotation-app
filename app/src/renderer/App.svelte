@@ -10,6 +10,7 @@
   import DOMPurify from 'dompurify'
   import type { Annotation, AnnotatedDocument, FileEntry, OpenedFile, RecoverySnapshot, SavedFile } from '../shared/model'
   import { annotationField, annotationHistory, focusDecorations, focusViewField, setAnnotationRanges, setFocusView } from './editor/annotation-field'
+  import { createLineStarts, createOutlineRows } from './editor/outline'
   import { createAnnotatedDocument, parseAnnotatedDocument, restoreAnnotations } from './format/json-format'
 
   interface DocumentTab {
@@ -54,9 +55,14 @@
   let noteDraft = $state('')
   let noteType = $state('comment')
   let query = $state('')
+  let showOrphans = $state(true)
   let focusMode = $state(false)
   const focusCompartment = new Compartment()
   let showExplorer = $state(true)
+  let showOutline = $state(true)
+  let outlineListHost = $state<HTMLDivElement>()
+  let outlineScrollTop = $state(0)
+  let outlineHeight = $state(200)
   let showAnnotations = $state(true)
   let lastSavedDocument: AnnotatedDocument | undefined
   let suppressEditorUpdate = false
@@ -75,13 +81,19 @@
     { id: 'important', label: 'Важно' },
   ]
   const markdownParser = new MarkdownIt({ html: false, linkify: true, breaks: true })
-  const activeTab = $derived(tabs.find((tab) => tab.id === activeTabId))
+  const outlineRows = $derived(createOutlineRows(annotations, createLineStarts(text)))
+  const outlineRowHeight = 38
+  const outlineStart = $derived(Math.max(0, Math.floor(outlineScrollTop / outlineRowHeight) - 4))
+  const outlineEnd = $derived(Math.min(outlineRows.length, Math.ceil((outlineScrollTop + outlineHeight) / outlineRowHeight) + 4))
+  const visibleOutlineRows = $derived(outlineRows.slice(outlineStart, outlineEnd))
 
   const visibleAnnotations = $derived(
     [...annotations]
       .filter((annotation) => !query || `${annotation.text} ${annotation.quote} ${annotation.tags.join(' ')}`.toLocaleLowerCase('ru').includes(query.toLocaleLowerCase('ru')))
       .sort((left, right) => Number(Boolean(left.orphan)) - Number(Boolean(right.orphan)) || left.start - right.start || right.end - left.end),
   )
+  const visibleLinkedAnnotations = $derived(visibleAnnotations.filter((annotation) => !annotation.orphan))
+  const visibleOrphanAnnotations = $derived(visibleAnnotations.filter((annotation) => annotation.orphan))
 
   function invoke<T>(channel: Parameters<typeof window.annotator.invoke>[0], payload?: unknown): Promise<T> {
     return window.annotator.invoke(channel, payload) as Promise<T>
@@ -209,6 +221,10 @@
   }
 
   function switchToDocument(file: OpenedFile): void {
+    if (savingTabId) {
+      status = 'Дождитесь завершения сохранения текущей вкладки.'
+      return
+    }
     const existing = tabs.find((tab) => tab.path === file.path && tab.annotationPath === (file.annotationPath ?? null))
     if (existing) {
       activateTab(existing.id)
@@ -329,6 +345,10 @@
   }
 
   async function newFile(): Promise<void> {
+    if (savingTabId) {
+      status = 'Дождитесь завершения сохранения текущей вкладки.'
+      return
+    }
     captureActiveTab()
     focusMode = false
     editor?.dispatch({
@@ -507,6 +527,51 @@
     if (selectedId === id) selectedId = null
     markDirty()
     syncRanges(true)
+  }
+
+  function rebindOrphan(id: string): void {
+    if (!editor) return
+    const selection = editor.state.selection.main
+    if (selection.empty) {
+      status = 'Выделите фрагмент текста, к которому нужно привязать заметку'
+      editor.focus()
+      return
+    }
+    const quote = editor.state.doc.sliceString(selection.from, selection.to)
+    annotations = annotations.map((annotation) => annotation.id === id
+      ? { ...annotation, start: selection.from, end: selection.to, quote, orphan: false, modified: new Date().toISOString() }
+      : annotation)
+    selectedId = id
+    markDirty()
+    syncRanges(true)
+    status = 'Аннотация привязана к выделению'
+  }
+
+  function findOrphanAgain(annotation: Annotation): void {
+    if (!editor || !annotation.quote) {
+      status = 'Для повторного поиска нет сохранённой цитаты'
+      return
+    }
+    const currentText = editor.state.doc.toString()
+    const contextual = annotation.quote
+    const candidates: number[] = []
+    let next = currentText.indexOf(contextual)
+    while (next >= 0) {
+      candidates.push(next)
+      next = currentText.indexOf(contextual, next + 1)
+    }
+    if (!candidates.length) {
+      status = 'Сохранённая цитата не найдена в документе'
+      return
+    }
+    const start = candidates.sort((left, right) => Math.abs(left - annotation.start) - Math.abs(right - annotation.start) || left - right)[0]!
+    annotations = annotations.map((item) => item.id === annotation.id
+      ? { ...item, start, end: start + contextual.length, orphan: false, modified: new Date().toISOString() }
+      : item)
+    selectedId = annotation.id
+    markDirty()
+    syncRanges(true)
+    status = 'Привязка восстановлена по цитате'
   }
 
   function updateAnnotation(id: string, changes: Partial<Annotation>, undoable = false): void {
@@ -782,9 +847,56 @@
             {/each}
           </div>
         {:else}
-          <div class="empty-hint"><span class="empty-icon">⌂</span><p>Откройте папку с документами,<br />чтобы видеть файлы здесь.</p><button onclick={() => void openFolder()}>Открыть папку</button></div>
+          <div class="file-tree empty-tree"><div class="empty-hint"><span class="empty-icon">⌂</span><p>Откройте папку с документами,<br />чтобы видеть файлы здесь.</p><button onclick={() => void openFolder()}>Открыть папку</button></div></div>
         {/if}
         <div class="explorer-footer"><button onclick={() => void openFile()}>＋ Открыть отдельный файл</button></div>
+        <section class:collapsed={!showOutline} class="outline-pane">
+          <div class="outline-heading">
+            <span>СТРУКТУРА</span>
+            <span class="count-badge">{outlineRows.length}</span>
+            <button class="icon-button" title={showOutline ? 'Свернуть навигатор' : 'Развернуть навигатор'} aria-expanded={showOutline} onclick={() => showOutline = !showOutline}>{showOutline ? '⌄' : '⌃'}</button>
+          </div>
+          {#if showOutline}
+            <div
+              class="outline-list"
+              role="listbox"
+              aria-label="Навигатор аннотаций"
+              tabindex="0"
+              bind:this={outlineListHost}
+              bind:clientHeight={outlineHeight}
+              onscroll={() => outlineScrollTop = outlineListHost?.scrollTop ?? 0}
+              onkeydown={(event) => {
+              if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
+              event.preventDefault()
+              const current = outlineRows.findIndex((row) => row.id === selectedId)
+              const next = outlineRows[Math.max(0, Math.min(outlineRows.length - 1, current + (event.key === 'ArrowDown' ? 1 : -1)))]
+              if (next) selectAnnotation(annotations.find((annotation) => annotation.id === next.id)!)
+            }}
+            >
+              {#if !outlineRows.length}
+                <div class="outline-empty">Аннотации появятся здесь</div>
+              {:else}
+                <div class="outline-spacer" style:height="{outlineStart * outlineRowHeight}px"></div>
+              {/if}
+              {#each visibleOutlineRows as row (row.id)}
+                <button class:chosen={selectedId === row.id} class="outline-row annot-card-{row.type}" onclick={() => {
+                  const annotation = annotations.find((item) => item.id === row.id)
+                  if (annotation) selectAnnotation(annotation)
+                }}>
+                  <span class="outline-type-dot"></span>
+                  <span class="outline-row-content">
+                    <span class="outline-quote">{row.quote || 'Без цитаты'}</span>
+                    {#if row.note}<span class="outline-note">{row.note}</span>{/if}
+                  </span>
+                  <span class="outline-line">{row.line}</span>
+                </button>
+              {/each}
+              {#if outlineRows.length}
+                <div class="outline-spacer" style:height="{Math.max(0, (outlineRows.length - outlineEnd) * outlineRowHeight)}px"></div>
+              {/if}
+            </div>
+          {/if}
+        </section>
       </aside>
     {/if}
 
@@ -839,11 +951,32 @@
             <div class="composer-actions"><button onclick={() => { pendingSelection = { from: 0, to: 0 }; noteDraft = '' }}>Отмена</button><button class="accent-button" onclick={confirmAnnotation}>Добавить</button></div>
           </section>
         {/if}
+        {#if annotations.some((annotation) => annotation.orphan)}
+          <section class="orphan-group">
+            <button class="orphan-heading" aria-expanded={showOrphans} onclick={() => showOrphans = !showOrphans}>
+              <span>{showOrphans ? '⌄' : '›'} БЕЗ ПРИВЯЗКИ</span>
+              <span class="count-badge">{annotations.filter((annotation) => annotation.orphan).length}</span>
+            </button>
+            {#if showOrphans}
+              {#each visibleOrphanAnnotations as annotation (annotation.id)}
+                <article class:chosen={selectedId === annotation.id} class="orphan-card">
+                  <div class="annotation-quote">“{annotation.quote.slice(0, 120)}”</div>
+                  <div class="annotation-rendered">{@html renderMarkdown(annotation.text || '*Пустая заметка*')}</div>
+                  <div class="orphan-actions">
+                    <button disabled={!editor || editor.state.selection.main.empty} title="Привязать к текущему выделению" onclick={() => rebindOrphan(annotation.id)}>Привязать к выделению</button>
+                    <button title="Найти цитату в документе" onclick={() => findOrphanAgain(annotation)}>Найти заново</button>
+                    <button class="delete-button" title="Удалить аннотацию" onclick={() => removeAnnotation(annotation.id)}>×</button>
+                  </div>
+                </article>
+              {/each}
+            {/if}
+          </section>
+        {/if}
         <div class="annotation-list" role="listbox" aria-label="Список аннотаций">
-          {#if visibleAnnotations.length === 0}
+          {#if visibleLinkedAnnotations.length === 0}
             <div class="empty-hint annotation-empty"><span class="empty-icon">✳</span><p>{annotations.length ? 'Совпадений не найдено.' : 'Выделите фрагмент текста и нажмите «＋ Аннотация», чтобы добавить заметку.'}</p></div>
           {/if}
-          {#each visibleAnnotations as annotation (annotation.id)}
+          {#each visibleLinkedAnnotations as annotation (annotation.id)}
             <article class:chosen={selectedId === annotation.id} class:orphan={annotation.orphan} class="annotation-card annot-card-{annotation.type}">
               <div class="card-heading">
                 <span class="type-dot"></span>

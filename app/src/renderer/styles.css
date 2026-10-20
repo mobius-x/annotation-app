@@ -82,6 +82,7 @@ input, textarea, select {
 .icon-button { width: 28px; height: 28px; padding: 0; display: grid; place-items: center; font-size: 15px; }
 .root-label { padding: 9px 12px; color: #d4d6e3; font-size: 12px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .file-tree { flex: 1; overflow: auto; padding: 2px 6px; }
+.empty-tree { display: flex; align-items: center; justify-content: center; }
 .tree-row { height: 27px; display: flex; align-items: center; gap: 6px; padding-right: 7px; padding-left: 4px; border-radius: 4px; cursor: pointer; font-size: 12px; }
 .tree-row:hover { background: var(--hover); }
 .tree-row:focus-visible { outline: 2px solid var(--accent); }
@@ -97,6 +98,28 @@ input, textarea, select {
 .depth-6 { padding-left: 82px; }
 .explorer-footer { border-top: 1px solid var(--border); padding: 8px; }
 .explorer-footer button { width: 100%; color: var(--fg-muted); font-size: 11px; text-align: left; }
+.outline-pane { min-height: 130px; max-height: 38%; flex: 0 1 230px; display: flex; flex-direction: column; border-top: 1px solid var(--border); }
+.outline-pane.collapsed { min-height: 38px; flex: 0 0 38px; }
+.outline-heading { height: 38px; flex: 0 0 38px; display: flex; align-items: center; gap: 8px; padding: 0 8px 0 14px; color: var(--fg-muted); font-size: 10px; font-weight: 700; letter-spacing: .08em; }
+.outline-heading .count-badge { margin-left: auto; }
+.outline-heading .icon-button { width: 22px; height: 24px; }
+.outline-list { flex: 1; min-height: 0; overflow: auto; padding: 0 5px 8px; }
+.outline-list:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.outline-spacer { width: 1px; }
+.outline-row { width: 100%; height: 38px; min-height: 38px; display: flex; align-items: center; gap: 7px; padding: 4px 6px; border-radius: 4px; text-align: left; }
+.outline-row:hover, .outline-row.chosen { background: var(--hover); }
+.outline-type-dot { width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; background: #f1fa8c; }
+.annot-card-note .outline-type-dot { background: #8be9fd; }
+.annot-card-question .outline-type-dot { background: #ffb86c; }
+.annot-card-idea .outline-type-dot { background: #50fa7b; }
+.annot-card-todo .outline-type-dot { background: #ff5555; }
+.annot-card-important .outline-type-dot { background: #ff79c6; }
+.outline-row-content { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.outline-quote, .outline-note { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }
+.outline-quote { color: #e2e3eb; }
+.outline-note { color: var(--fg-muted); }
+.outline-line { color: var(--fg-muted); font-size: 9px; }
+.outline-empty { padding: 16px 8px; color: var(--fg-muted); text-align: center; font-size: 10px; }
 
 .editor-column { min-width: 360px; flex: 1; display: flex; flex-direction: column; background: var(--editor-bg); }
 .document-tabs { height: 38px; flex: 0 0 38px; display: flex; align-items: center; padding: 0 7px 0 6px; background: #252631; border-bottom: 1px solid var(--border); }
@@ -123,6 +146,15 @@ input, textarea, select {
 .status-message { margin-left: auto; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 
 .annotations .search-input { margin: 0 12px 10px; width: calc(100% - 24px); font-size: 11px; }
+.orphan-group { flex: 0 0 auto; max-height: 36%; overflow: auto; margin: 0 10px 8px; border: 1px solid #6e414b; border-radius: 6px; background: #30252a; }
+.orphan-heading { width: 100%; display: flex; align-items: center; justify-content: space-between; padding: 8px 10px; color: #ffb2b8; font-size: 10px; font-weight: 700; letter-spacing: .06em; text-align: left; }
+.orphan-card { padding: 7px 10px 9px; border-top: 1px solid #553840; }
+.orphan-card .annotation-quote { margin: 2px 0 5px; }
+.orphan-card .annotation-rendered { padding: 0 2px; }
+.orphan-actions { display: flex; align-items: center; gap: 3px; margin-top: 5px; }
+.orphan-actions button { padding: 4px 5px; color: #e2c5ca; font-size: 9px; }
+.orphan-actions button:hover { color: #fff; }
+.orphan-actions .delete-button { margin-left: auto; font-size: 16px; }
 .count-badge { min-width: 20px; padding: 2px 6px; border-radius: 10px; color: #d9dbea; background: #373949; text-align: center; font-size: 10px; letter-spacing: 0; }
 .annotation-list { flex: 1; min-height: 0; overflow-y: auto; padding: 0 10px 12px; }
 .annotation-card { position: relative; margin-bottom: 9px; padding: 10px; border: 1px solid var(--border); border-left: 3px solid #f1fa8c; border-radius: 6px; background: var(--card-bg); cursor: pointer; }
