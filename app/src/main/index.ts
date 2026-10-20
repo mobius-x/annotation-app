@@ -210,6 +210,13 @@ function recoveryPath(documentPath: string | null): string {
 async function saveDocument(request: SaveRequest): Promise<SavedFile | null> {
   let target = request.path ? path.resolve(request.path) : null
   if (target && !isAllowedPath(target)) throw new Error('Сохранение вне разрешённой рабочей области запрещено.')
+  if (target && request.annotationPath) {
+    const annotationTarget = path.resolve(request.annotationPath)
+    const validSidecars = [target, annotatedPath(target), annotatedPath(target, 'md')]
+    if (!isAllowedPath(annotationTarget) || !validSidecars.includes(annotationTarget)) {
+      throw new Error('Файл аннотаций должен находиться рядом с исходным документом.')
+    }
+  }
   const isNewSource = !target
   if (!target) {
     if (!mainWindow) return null

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { invertedEffects } from '@codemirror/commands'
 import { EditorState, Transaction } from '@codemirror/state'
 import type { Annotation } from '../../shared/model'
-import { annotationField, annotationHistory, setAnnotationRanges } from './annotation-field'
+import { annotationField, annotationHistory, getFocusRanges, setAnnotationRanges } from './annotation-field'
 
 const note: Annotation = {
   id: 'a123abc',
@@ -24,6 +24,7 @@ describe('annotation history', () => {
       doc: 'Текст',
       extensions: [annotationField, annotationHistory],
     })
+
     const transaction = state.update({
       effects: setAnnotationRanges.of([note]),
       annotations: Transaction.addToHistory.of(true),
@@ -40,5 +41,20 @@ describe('annotation history', () => {
       annotations: Transaction.addToHistory.of(true),
     }).state
     expect(state.field(annotationField)).toHaveLength(1)
+  })
+})
+
+describe('focus view ranges', () => {
+  it('merges touching and overlapping annotations and ignores orphans', () => {
+    expect(getFocusRanges([
+      { ...note, start: 2, end: 5 },
+      { ...note, id: 'next', start: 5, end: 8 },
+      { ...note, id: 'overlap', start: 7, end: 10 },
+      { ...note, id: 'orphan', start: 12, end: 14, orphan: true },
+    ], 20)).toEqual([{ from: 2, to: 10 }])
+  })
+
+  it('adds context and clips it to document bounds', () => {
+    expect(getFocusRanges([{ ...note, start: 2, end: 4 }], 10, 5)).toEqual([{ from: 0, to: 9 }])
   })
 })

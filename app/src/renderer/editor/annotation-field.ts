@@ -1,9 +1,80 @@
-import { StateEffect, StateField, Transaction } from '@codemirror/state'
-import { Decoration, EditorView } from '@codemirror/view'
+import { StateEffect, StateField, Transaction, type Range } from '@codemirror/state'
+import { Decoration, EditorView, WidgetType, type DecorationSet } from '@codemirror/view'
 import { invertedEffects } from '@codemirror/commands'
 import type { Annotation } from '../../shared/model'
 
 export const setAnnotationRanges = StateEffect.define<Annotation[]>()
+export const setFocusView = StateEffect.define<boolean>()
+
+export function getFocusRanges(annotations: Annotation[], length: number, contextChars = 0): Array<{ from: number; to: number }> {
+  const sorted = annotations
+    .filter((annotation) => !annotation.orphan && annotation.start < annotation.end)
+    .map((annotation) => ({
+      from: Math.max(0, annotation.start - contextChars),
+      to: Math.min(length, annotation.end + contextChars),
+    }))
+    .sort((left, right) => left.from - right.from || left.to - right.to)
+  const merged: Array<{ from: number; to: number }> = []
+  for (const range of sorted) {
+    const previous = merged.at(-1)
+    if (previous && range.from <= previous.to) previous.to = Math.max(previous.to, range.to)
+    else merged.push({ ...range })
+  }
+  return merged
+}
+
+class FocusGapWidget extends WidgetType {
+  toDOM(): HTMLElement {
+    const gap = document.createElement('span')
+    gap.className = 'cm-focus-gap'
+    gap.textContent = '\n\n'
+    return gap
+  }
+}
+
+const focusGapWidget = new FocusGapWidget()
+
+export const focusViewField = StateField.define<boolean>({
+  create: () => false,
+  update(enabled, transaction) {
+    for (const effect of transaction.effects) {
+      if (effect.is(setFocusView)) enabled = effect.value
+    }
+    return enabled
+  },
+})
+
+export const focusDecorations = StateField.define<DecorationSet>({
+  create: (state) => buildFocusDecorations(state.doc.length, state.field(annotationField), state.field(focusViewField)),
+  update(decorations, transaction) {
+    if (!transaction.docChanged
+      && !transaction.effects.some((effect) => effect.is(setAnnotationRanges) || effect.is(setFocusView))) return decorations
+    const enabled = transaction.state.field(focusViewField)
+    return buildFocusDecorations(
+      transaction.newDoc.length,
+      transaction.state.field(annotationField),
+      enabled,
+    )
+  },
+  provide: (field) => [
+    EditorView.decorations.from(field),
+    EditorView.atomicRanges.of((view) => view.state.field(field)),
+  ],
+})
+
+function buildFocusDecorations(length: number, annotations: Annotation[], enabled: boolean): DecorationSet {
+  if (!enabled) return Decoration.none
+  const visible = getFocusRanges(annotations, length)
+  const gaps: Range<Decoration>[] = []
+  let position = 0
+  for (const range of visible) {
+    if (range.from > position) gaps.push(Decoration.replace({ widget: focusGapWidget, inclusive: false }).range(position, range.from))
+    position = range.to
+  }
+  if (position < length) gaps.push(Decoration.replace({ widget: focusGapWidget, inclusive: false }).range(position, length))
+  return Decoration.set(gaps, true)
+}
+
 export const annotationHistory = invertedEffects.of((transaction) => {
   if (transaction.annotation(Transaction.addToHistory) === false) return []
   return transaction.effects.some((effect) => effect.is(setAnnotationRanges))

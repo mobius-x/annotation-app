@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte'
-  import { EditorState, Transaction } from '@codemirror/state'
+  import { Compartment, EditorState, Transaction } from '@codemirror/state'
   import { history, historyKeymap } from '@codemirror/commands'
   import { defaultHighlightStyle, indentOnInput, syntaxHighlighting } from '@codemirror/language'
   import { markdown } from '@codemirror/lang-markdown'
@@ -9,7 +9,7 @@
   import MarkdownIt from 'markdown-it'
   import DOMPurify from 'dompurify'
   import type { Annotation, AnnotatedDocument, FileEntry, OpenedFile, RecoverySnapshot, SavedFile } from '../shared/model'
-  import { annotationField, annotationHistory, setAnnotationRanges } from './editor/annotation-field'
+  import { annotationField, annotationHistory, focusDecorations, focusViewField, setAnnotationRanges, setFocusView } from './editor/annotation-field'
   import { createAnnotatedDocument, parseAnnotatedDocument, restoreAnnotations } from './format/json-format'
 
   let editorHost: HTMLDivElement
@@ -32,6 +32,7 @@
   let noteType = $state('comment')
   let query = $state('')
   let focusMode = $state(false)
+  const focusCompartment = new Compartment()
   let showExplorer = $state(true)
   let showAnnotations = $state(true)
   let lastSavedDocument: AnnotatedDocument | undefined
@@ -86,6 +87,21 @@
   function markDirty(): void {
     revision += 1
     dirty = true
+  }
+
+  function setFocusMode(enabled: boolean): void {
+    focusMode = enabled
+    editor?.dispatch({
+      effects: [
+        setFocusView.of(enabled),
+        focusCompartment.reconfigure(enabled
+          ? [
+              EditorState.readOnly.of(true),
+              EditorState.transactionFilter.of((transaction) => transaction.docChanged ? [] : transaction),
+            ]
+          : []),
+      ],
+    })
   }
 
   function normalizeSource(file: OpenedFile): void {
@@ -345,7 +361,7 @@
       event.preventDefault()
       moveAnnotation(-1)
     } else if (!typing && code === 'F9') {
-      focusMode = !focusMode
+      setFocusMode(!focusMode)
     } else if (mod && code === 'Digit1') {
       showExplorer = !showExplorer
     } else if (mod && code === 'Digit3') {
@@ -406,7 +422,10 @@
       syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
       keymap.of([...historyKeymap, ...searchKeymap]),
       annotationField,
+      focusViewField,
+      focusDecorations,
       annotationHistory,
+      focusCompartment.of([]),
       EditorView.lineWrapping,
       EditorView.cspNonce.of(document.querySelector<HTMLMetaElement>('meta[name="csp-nonce"]')?.content ?? ''),
       EditorView.updateListener.of((update) => {
@@ -422,6 +441,40 @@
           status = 'Изменения не сохранены'
         }
       }),
+      EditorView.domEventHandlers({
+        copy(event, view) {
+          if (!focusMode || !event.clipboardData) return false
+          const selection = view.state.selection.main
+          const visible = annotations
+            .filter((annotation) => !annotation.orphan && annotation.start < selection.to && annotation.end > selection.from)
+            .sort((left, right) => left.start - right.start || left.end - right.end)
+          const ranges: Array<{ from: number; to: number }> = []
+          for (const annotation of visible) {
+            const from = Math.max(selection.from, annotation.start)
+            const to = Math.min(selection.to, annotation.end)
+            const previous = ranges.at(-1)
+            if (previous && from <= previous.to) previous.to = Math.max(previous.to, to)
+            else ranges.push({ from, to })
+          }
+          event.clipboardData.setData('text/plain', ranges.map((range) => view.state.doc.sliceString(range.from, range.to)).join('\n\n'))
+          event.preventDefault()
+          return true
+        },
+        click(event, view) {
+          if (!focusMode) return false
+          const position = view.posAtCoords({ x: event.clientX, y: event.clientY })
+          const annotation = position === null ? undefined : annotations.find((item) => !item.orphan && item.start <= position && position < item.end)
+          if (annotation) selectedId = annotation.id
+          return false
+        },
+        dblclick(event, view) {
+          if (!focusMode) return false
+          const position = view.posAtCoords({ x: event.clientX, y: event.clientY })
+          setFocusMode(false)
+          if (position !== null) view.dispatch({ selection: { anchor: position }, scrollIntoView: true })
+          return true
+        },
+      }),
       EditorView.theme({
         '&': { height: '100%', color: 'var(--editor-fg)', backgroundColor: 'var(--editor-bg)', fontSize: '16px' },
         '.cm-content': { fontFamily: 'Cascadia Mono, Consolas, monospace', lineHeight: '1.6', padding: '24px', caretColor: 'var(--editor-fg)' },
@@ -429,6 +482,7 @@
         '.cm-activeLine': { backgroundColor: 'color-mix(in srgb, var(--editor-fg) 4%, transparent)' },
         '.cm-activeLineGutter': { backgroundColor: 'transparent' },
         '.cm-selectionBackground': { backgroundColor: 'var(--selection) !important' },
+        '.cm-focus-gap': { display: 'inline-block', whiteSpace: 'pre-wrap', minWidth: '1px', height: '2.5em', verticalAlign: 'baseline' },
       }),
     ]
     editor = new EditorView({
@@ -495,7 +549,7 @@
       <button onclick={() => void save(true)} title="Сохранить как (Ctrl+Shift+S)">Сохранить как…</button>
     </div>
     <div class="toolbar-spacer"></div>
-    <button class:active={focusMode} onclick={() => focusMode = !focusMode} title="Режим фокуса (F9)">Фокус</button>
+    <button class:active={focusMode} onclick={() => setFocusMode(!focusMode)} title="Режим фокуса (F9)">Фокус</button>
   </header>
 
   <div class="workspace">
