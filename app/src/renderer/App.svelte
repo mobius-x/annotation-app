@@ -13,6 +13,7 @@
   import { createLineStarts, createOutlineRows } from './editor/outline'
   import { parseTags } from './editor/annotation-tags'
   import { createAnnotatedDocument, parseAnnotatedDocument, restoreAnnotations } from './format/json-format'
+  import { resolveTheme, settingsSchema, themes, type AppSettings } from '../shared/settings'
 
   interface DocumentTab {
     id: string
@@ -68,6 +69,8 @@
   let outlineScrollTop = $state(0)
   let outlineHeight = $state(200)
   let showAnnotations = $state(true)
+  let showSettings = $state(false)
+  let settings = $state<AppSettings>(settingsSchema.parse({}))
   let lastSavedDocument: AnnotatedDocument | undefined
   let suppressEditorUpdate = false
   let autosaveTimer: ReturnType<typeof setTimeout> | undefined
@@ -103,6 +106,65 @@
 
   function invoke<T>(channel: Parameters<typeof window.annotator.invoke>[0], payload?: unknown): Promise<T> {
     return window.annotator.invoke(channel, payload) as Promise<T>
+  }
+
+  function applyTheme(): void {
+    const palette = resolveTheme(settings.theme, settings.colorOverrides)
+    const root = document.documentElement
+    const variableNames: Record<string, string> = {
+      'ui.bg': '--ui-bg',
+      'ui.fg': '--ui-fg',
+      'ui.fgMuted': '--fg-muted',
+      'ui.border': '--border',
+      'ui.accent': '--accent',
+      'ui.accentFg': '--accent-fg',
+      'ui.hover': '--hover',
+      'ui.danger': '--danger',
+      'editor.bg': '--editor-bg',
+      'editor.fg': '--editor-fg',
+      'editor.selection': '--selection',
+      'editor.gutterFg': '--gutter-fg',
+      'annot.default': '--annot-default',
+      'annot.comment': '--annot-comment',
+      'annot.note': '--annot-note',
+      'annot.question': '--annot-question',
+      'annot.idea': '--annot-idea',
+      'annot.todo': '--annot-todo',
+      'annot.important': '--annot-important',
+    }
+    for (const [key, variable] of Object.entries(variableNames)) {
+      root.style.setProperty(variable, palette.colors[key]!)
+    }
+    root.style.setProperty('--editor-font-family', settings.editor.fontFamily)
+    root.style.setProperty('--editor-font-size', `${settings.editor.fontSize}px`)
+    root.style.setProperty('--editor-line-height', String(settings.editor.lineHeight))
+    root.style.setProperty('--card-bg', palette.colors['ui.bg']!)
+    root.style.colorScheme = palette.kind
+  }
+
+  async function loadSettings(): Promise<void> {
+    try {
+      const result = await invoke<{ settings: AppSettings; error: string | null }>('settings:get')
+      settings = settingsSchema.parse(result.settings)
+      applyTheme()
+      if (result.error) status = `Настройки не загружены: ${result.error}`
+    } catch (error) {
+      status = `Не удалось загрузить настройки: ${error instanceof Error ? error.message : String(error)}`
+    }
+  }
+
+  async function saveSettings(): Promise<void> {
+    try {
+      const validated = settingsSchema.parse(settings)
+      const plainSettings = JSON.parse(JSON.stringify(validated)) as AppSettings
+      const result = await invoke<{ settings: AppSettings; error: null }>('settings:save', plainSettings)
+      settings = settingsSchema.parse(result.settings)
+      applyTheme()
+      showSettings = false
+      status = 'Настройки сохранены'
+    } catch (error) {
+      status = `Не удалось сохранить настройки: ${error instanceof Error ? error.message : String(error)}`
+    }
   }
 
   function syncRanges(undoable = false): void {
@@ -789,8 +851,8 @@
       }),
       EditorView.theme({
         '&': { height: '100%', color: 'var(--editor-fg)', backgroundColor: 'var(--editor-bg)', fontSize: '16px' },
-        '.cm-content': { fontFamily: 'Cascadia Mono, Consolas, monospace', lineHeight: '1.6', padding: '24px', caretColor: 'var(--editor-fg)' },
-        '.cm-gutters': { backgroundColor: 'var(--editor-bg)', color: 'var(--fg-muted)', border: 'none' },
+        '.cm-content': { fontFamily: 'var(--editor-font-family)', fontSize: 'var(--editor-font-size)', lineHeight: 'var(--editor-line-height)', padding: '24px', caretColor: 'var(--editor-fg)' },
+        '.cm-gutters': { backgroundColor: 'var(--editor-bg)', color: 'var(--gutter-fg)', border: 'none' },
         '.cm-activeLine': { backgroundColor: 'color-mix(in srgb, var(--editor-fg) 4%, transparent)' },
         '.cm-activeLineGutter': { backgroundColor: 'transparent' },
         '.cm-selectionBackground': { backgroundColor: 'var(--selection) !important' },
@@ -804,6 +866,7 @@
     const firstTab = createCurrentTab('untitled:initial')
     tabs = [firstTab]
     activeTabId = firstTab.id
+    void loadSettings()
     void checkRecovery()
     window.addEventListener('keydown', handleKeydown)
     const unsubscribeOpen = window.annotator.onOpenFile(normalizeSource)
@@ -865,6 +928,7 @@
     </div>
     <div class="toolbar-spacer"></div>
     <button class:active={focusMode} onclick={() => setFocusMode(!focusMode)} title="Режим фокуса (F9)">Фокус</button>
+    <button onclick={() => { void loadSettings(); showSettings = true }} title="Настройки приложения">⚙</button>
   </header>
 
   <div class="workspace">
@@ -880,6 +944,35 @@
           </div>
         {:else}
           <div class="file-tree empty-tree"><div class="empty-hint"><span class="empty-icon">⌂</span><p>Откройте папку с документами,<br />чтобы видеть файлы здесь.</p><button onclick={() => void openFolder()}>Открыть папку</button></div></div>
+        {/if}
+
+        {#if showSettings}
+          <div class="modal-backdrop">
+            <dialog open class="settings-dialog" aria-labelledby="settings-title">
+              <h2 id="settings-title">Настройки Annotator</h2>
+              <label class="settings-field">
+                <span>Цветовая тема</span>
+                <select bind:value={settings.theme} onchange={applyTheme}>
+                  {#each Object.keys(themes) as themeId}<option value={themeId}>{themeId}</option>{/each}
+                </select>
+              </label>
+              <label class="settings-field">
+                <span>Шрифт редактора</span>
+                <input bind:value={settings.editor.fontFamily} oninput={applyTheme} />
+              </label>
+              <label class="settings-field">
+                <span>Размер текста: {settings.editor.fontSize}px</span>
+                <input type="range" min="8" max="48" step="1" bind:value={settings.editor.fontSize} oninput={applyTheme} />
+              </label>
+              <p class="font-preview" style:font-family={settings.editor.fontFamily} style:font-size="{settings.editor.fontSize}px">
+                Русский текст, English, 123 — «Кавычки», ёж и фрагмент.
+              </p>
+              <div class="settings-actions">
+                <button onclick={() => { showSettings = false; void loadSettings() }}>Отмена</button>
+                <button class="accent-button" onclick={() => void saveSettings()}>Сохранить настройки</button>
+              </div>
+            </dialog>
+          </div>
         {/if}
         <div class="explorer-footer"><button onclick={() => void openFile()}>＋ Открыть отдельный файл</button></div>
         <section class:collapsed={!showOutline} class="outline-pane">

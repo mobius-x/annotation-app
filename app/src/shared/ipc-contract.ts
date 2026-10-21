@@ -14,6 +14,8 @@ export const channelSchemas = {
     hasBom: z.boolean(),
     document: z.record(z.string(), z.unknown()).nullable(),
   }),
+  'settings:get': z.void(),
+  'settings:save': z.record(z.string(), z.unknown()),
   'recovery:save': z.object({
     path: z.string().nullable(),
     text: z.string(),

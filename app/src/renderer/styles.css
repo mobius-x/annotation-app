@@ -1,9 +1,10 @@
 :root {
   font-family: "Segoe UI", sans-serif;
-  color: #f8f8f2;
-  background: #282a36;
+  color: var(--ui-fg);
+  background: var(--editor-bg);
   font-synthesis: none;
   --ui-bg: #21222c;
+  --ui-fg: #f8f8f2;
   --editor-bg: #282a36;
   --editor-fg: #f8f8f2;
   --fg-muted: #a5abc4;
@@ -14,6 +15,14 @@
   --hover: #343644;
   --danger: #ff6b76;
   --card-bg: #252631;
+  --annot-default: #f1fa8c;
+  --annot-comment: #f1fa8c;
+  --annot-note: #8be9fd;
+  --annot-question: #ffb86c;
+  --annot-idea: #50fa7b;
+  --annot-todo: #ff5555;
+  --annot-important: #ff79c6;
+  --gutter-fg: #a5abc4;
 }
 
 * { box-sizing: border-box; }
@@ -37,7 +46,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 button:disabled { opacity: .5; cursor: default; }
 input, textarea, select {
   color: inherit;
-  background: #1d1e28;
+  background: var(--ui-bg);
   border: 1px solid var(--border);
   border-radius: 5px;
   padding: 8px 10px;
@@ -55,9 +64,10 @@ input, textarea, select {
   border-bottom: 1px solid var(--border);
 }
 .brand { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 650; white-space: nowrap; }
-.brand-mark { display: grid; place-items: center; width: 22px; height: 22px; color: #282a36; background: var(--accent); border-radius: 6px; font-weight: 800; }
+.brand-mark { display: grid; place-items: center; width: 22px; height: 22px; color: var(--accent-fg); background: var(--accent); border-radius: 6px; font-weight: 800; }
 .toolbar-group { display: flex; gap: 3px; align-items: center; }
 .toolbar-group button { font-size: 12px; color: #e2e3ec; }
+.toolbar > button { color: var(--ui-fg); }
 .toolbar-spacer, .tab-spacer { flex: 1; }
 .accent-button { color: var(--accent-fg) !important; background: var(--accent) !important; border-color: transparent !important; font-weight: 650; }
 .accent-button:hover { filter: brightness(1.08); }
@@ -89,7 +99,7 @@ input, textarea, select {
 .tree-chevron { width: 12px; color: #9da3bd; text-align: center; font-size: 10px; }
 .tree-icon { width: 15px; color: #bdc4df; text-align: center; }
 .tree-name { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.tree-annotated { color: #f1fa8c; font-size: 11px; }
+.tree-annotated { color: var(--annot-default); font-size: 11px; }
 .depth-1 { padding-left: 17px; }
 .depth-2 { padding-left: 30px; }
 .depth-3 { padding-left: 43px; }
@@ -136,12 +146,12 @@ input, textarea, select {
 .editor-surface .cm-editor { min-height: 100%; }
 .editor-surface .cm-scroller { overflow: auto; }
 .editor-surface .cm-content { max-width: 105ch; }
-.annot-mark { border-radius: 2px; background: color-mix(in srgb, #f1fa8c 18%, transparent); box-decoration-break: clone; }
-.annot-question { background: color-mix(in srgb, #ffb86c 22%, transparent); }
-.annot-note { background: color-mix(in srgb, #8be9fd 18%, transparent); }
-.annot-idea { background: color-mix(in srgb, #50fa7b 18%, transparent); }
-.annot-todo { background: color-mix(in srgb, #ff5555 18%, transparent); }
-.annot-important { background: color-mix(in srgb, #ff79c6 18%, transparent); }
+.annot-mark { border-radius: 2px; background: color-mix(in srgb, var(--annot-comment) 18%, transparent); box-decoration-break: clone; }
+.annot-question { background: color-mix(in srgb, var(--annot-question) 22%, transparent); }
+.annot-note { background: color-mix(in srgb, var(--annot-note) 18%, transparent); }
+.annot-idea { background: color-mix(in srgb, var(--annot-idea) 18%, transparent); }
+.annot-todo { background: color-mix(in srgb, var(--annot-todo) 18%, transparent); }
+.annot-important { background: color-mix(in srgb, var(--annot-important) 18%, transparent); }
 .statusbar { height: 25px; flex: 0 0 25px; display: flex; align-items: center; gap: 16px; padding: 0 10px; color: #d0d2de; background: #343644; font-size: 10px; }
 .status-message { margin-left: auto; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 
@@ -161,17 +171,17 @@ input, textarea, select {
 .orphan-actions .delete-button { margin-left: auto; font-size: 16px; }
 .count-badge { min-width: 20px; padding: 2px 6px; border-radius: 10px; color: #d9dbea; background: #373949; text-align: center; font-size: 10px; letter-spacing: 0; }
 .annotation-list { flex: 1; min-height: 0; overflow-y: auto; padding: 0 10px 12px; }
-.annotation-card { position: relative; margin-bottom: 9px; padding: 10px; border: 1px solid var(--border); border-left: 3px solid #f1fa8c; border-radius: 6px; background: var(--card-bg); cursor: pointer; }
+.annotation-card { position: relative; margin-bottom: 9px; padding: 10px; border: 1px solid var(--border); border-left: 3px solid var(--annot-comment); border-radius: 6px; background: var(--card-bg); cursor: pointer; }
 .annotation-card:hover, .annotation-card.chosen { border-color: #60627a; background: #292a37; }
 .annotation-card.chosen { box-shadow: 0 0 0 1px #bd93f955; }
 .annotation-card.orphan { border-left-color: var(--danger); }
 .card-heading { display: flex; align-items: center; gap: 7px; }
-.type-dot { width: 8px; height: 8px; border-radius: 50%; background: #f1fa8c; }
-.annot-card-question .type-dot { background: #ffb86c; }
-.annot-card-note .type-dot { background: #8be9fd; }
-.annot-card-idea .type-dot { background: #50fa7b; }
-.annot-card-todo .type-dot { background: #ff5555; }
-.annot-card-important .type-dot { background: #ff79c6; }
+.type-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--annot-comment); }
+.annot-card-question .type-dot { background: var(--annot-question); }
+.annot-card-note .type-dot { background: var(--annot-note); }
+.annot-card-idea .type-dot { background: var(--annot-idea); }
+.annot-card-todo .type-dot { background: var(--annot-todo); }
+.annot-card-important .type-dot { background: var(--annot-important); }
 .card-heading select { flex: 1; min-width: 0; padding: 2px 4px; border-color: transparent; background: transparent; font-size: 11px; cursor: pointer; }
 .resolve-button, .delete-button { width: 24px; height: 24px; padding: 0; color: var(--fg-muted); }
 .resolve-button.resolved { color: #50fa7b; }
@@ -180,7 +190,7 @@ input, textarea, select {
 .annotation-quote { margin: 7px 0; color: #aeb2c4; font-size: 11px; line-height: 1.5; }
 .card-main { display: block; width: 100%; padding: 0; text-align: left; }
 .card-main:hover { background: transparent; }
-.annotation-rendered { padding: 2px 3px 5px; color: #e2e3eb; font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
+.annotation-rendered { padding: 2px 3px 5px; color: var(--ui-fg); font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
 .annotation-rendered p { margin: 4px 0; }
 .annotation-rendered ul, .annotation-rendered ol { margin: 4px 0; padding-left: 20px; }
 .annotation-rendered a { color: #8be9fd; }
@@ -208,6 +218,13 @@ input, textarea, select {
 .close-dialog h2 { margin: 0 0 10px; font-size: 16px; }
 .close-dialog p { color: var(--fg-muted); font-size: 13px; line-height: 1.5; }
 .close-dialog-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 7px; margin-top: 18px; }
+.settings-dialog { position: static; max-width: none; max-height: none; width: min(520px, 100%); margin: 0; padding: 22px; border: 1px solid var(--border); border-radius: 9px; color: var(--ui-fg); background: var(--ui-bg); box-shadow: 0 16px 60px #0008; }
+.settings-dialog h2 { margin: 0 0 18px; font-size: 17px; }
+.settings-field { display: grid; grid-template-columns: 150px minmax(0, 1fr); align-items: center; gap: 12px; margin: 12px 0; color: var(--ui-fg-muted, var(--fg-muted)); font-size: 12px; }
+.settings-field select, .settings-field input:not([type="range"]) { width: 100%; }
+.settings-field input[type="range"] { width: 100%; accent-color: var(--accent); }
+.font-preview { min-height: 56px; margin: 20px 0; padding: 12px; border: 1px solid var(--border); border-radius: 5px; color: var(--editor-fg); background: var(--editor-bg); line-height: 1.5; }
+.settings-actions { display: flex; justify-content: flex-end; gap: 8px; }
 
 @media (max-width: 1100px) {
   .explorer { width: 200px; flex-basis: 200px; }

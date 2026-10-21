@@ -8,6 +8,7 @@ import chokidar from 'chokidar'
 import chardet from 'chardet'
 import iconv from 'iconv-lite'
 import { channelNames, channelSchemas, type Channel } from '../shared/ipc-contract'
+import { defaultSettings, settingsSchema, themes } from '../shared/settings'
 import { parseMarkdownDocument, serializeMarkdownDocument } from '../shared/markdown-format'
 import type { AnnotatedDocument, FileEntry, OpenedFile, RecoverySnapshot, SaveRequest, SavedFile } from '../shared/model'
 
@@ -207,6 +208,43 @@ function recoveryPath(documentPath: string | null): string {
   return path.join(app.getPath('userData'), 'recovery', `${key}.json`)
 }
 
+function settingsPath(): string {
+  return path.join(app.getPath('userData'), 'settings.json')
+}
+
+async function readSettings(): Promise<{ settings: unknown; error: string | null }> {
+  try {
+    const raw = await fs.readFile(settingsPath(), 'utf8')
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(raw)
+    } catch (error) {
+      return { settings: defaultSettings, error: `settings.json: ${error instanceof Error ? error.message : String(error)}` }
+    }
+    const result = settingsSchema.safeParse(parsed)
+    if (!result.success) {
+      const issue = result.error.issues[0]
+      return { settings: defaultSettings, error: `settings.json (${issue.path.join('.') || 'корень'}): ${issue.message}` }
+    }
+    if (!(result.data.theme in themes)) {
+      return { settings: defaultSettings, error: `settings.json (theme): неизвестная тема «${result.data.theme}»` }
+    }
+    return { settings: result.data, error: null }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { settings: defaultSettings, error: null }
+    throw error
+  }
+}
+
+async function writeSettings(raw: Record<string, unknown>): Promise<{ settings: unknown; error: null }> {
+  const parsed = settingsSchema.parse(raw)
+  if (!(parsed.theme in themes)) throw new Error(`Неизвестная тема «${parsed.theme}».`)
+  const target = settingsPath()
+  await fs.mkdir(path.dirname(target), { recursive: true })
+  await atomicWrite(target, Buffer.from(`${JSON.stringify(parsed, null, 2)}\n`, 'utf8'))
+  return { settings: parsed, error: null }
+}
+
 async function saveDocument(request: SaveRequest): Promise<SavedFile | null> {
   let target = request.path ? path.resolve(request.path) : null
   if (target && !isAllowedPath(target)) throw new Error('Сохранение вне разрешённой рабочей области запрещено.')
@@ -288,6 +326,8 @@ function registerIpc(): void {
   installHandler('fs:list', ({ path: directory }) => listDirectory(directory))
   installHandler('fs:read', ({ path: filePath }) => readDocument(path.resolve(filePath)))
   installHandler('fs:save', (payload) => saveDocument(payload as SaveRequest))
+  installHandler('settings:get', () => readSettings())
+  installHandler('settings:save', (settings) => writeSettings(settings))
   installHandler('recovery:save', async (snapshot) => {
     const target = recoveryPath(snapshot.path)
     await fs.mkdir(path.dirname(target), { recursive: true })

@@ -7,6 +7,8 @@ const channelNames: Channel[] = [
   'fs:list',
   'fs:read',
   'fs:save',
+  'settings:get',
+  'settings:save',
   'recovery:save',
   'recovery:list',
   'recovery:delete',
