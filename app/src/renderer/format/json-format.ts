@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import type { Annotation, AnnotatedDocument } from '../../shared/model'
+import { quoteContext, restoreQuoteAnchor, textOffsetsAt } from '../../shared/text-offsets'
 
 const rangeSchema = z.object({
   start: z.number().int().nonnegative(),
@@ -19,8 +20,12 @@ const annotationSchema = z.object({
   tags: z.array(z.string()),
   color: z.string().nullable(),
   resolved: z.boolean(),
+  status: z.enum(['open', 'resolved', 'archived']).optional(),
   created: z.string(),
   modified: z.string(),
+  author: z.string().optional(),
+  parentId: z.string().optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
 }).passthrough()
 
 export const annotatedDocumentSchema = z.object({
@@ -76,15 +81,14 @@ export async function createAnnotatedDocument(
     const start = Math.max(0, Math.min(text.length, annotation.start))
     const end = Math.min(text.length, Math.max(start + 1, annotation.end))
     const exact = annotation.orphan ? annotation.quote : text.slice(start, end)
-    const { text: body, start: _start, end: _end, quote: _quote, orphan: _orphan, ...extra } = annotation
+    const context = annotation.orphan
+      ? { exact, prefix: annotation.quotePrefix ?? '', suffix: annotation.quoteSuffix ?? '' }
+      : quoteContext(text, start, end)
+    const { text: body, start: _start, end: _end, quote: _quote, quotePrefix: _quotePrefix, quoteSuffix: _quoteSuffix, orphan: _orphan, startUtf8: _startUtf8, endUtf8: _endUtf8, startGrapheme: _startGrapheme, endGrapheme: _endGrapheme, ...extra } = annotation
     return {
       ...extra,
       range: annotation.orphan || !exact ? null : { start, end },
-      quote: {
-        exact,
-        prefix: annotation.orphan ? '' : text.slice(Math.max(0, start - 30), start),
-        suffix: annotation.orphan ? '' : text.slice(end, end + 30),
-      },
+      quote: context,
       body,
     }
   }).filter((annotation) => annotation.range !== null || annotation.quote.exact)
@@ -118,29 +122,17 @@ export function restoreAnnotations(document: AnnotatedDocument): { annotations: 
   const annotations = document.annotations.map((record) => {
     let range = record.range
     if (!range || document.text.slice(range.start, range.end) !== record.quote.exact) {
-      const contextual = record.quote.prefix + record.quote.exact + record.quote.suffix
-      const contextualStart = contextual.length > record.quote.exact.length
-        ? document.text.indexOf(contextual)
-        : -1
-      let start = contextualStart >= 0 ? contextualStart + record.quote.prefix.length : -1
-      if (start < 0 && record.quote.exact) {
-        const matches: number[] = []
-        let next = document.text.indexOf(record.quote.exact)
-        while (next >= 0) {
-          matches.push(next)
-          next = document.text.indexOf(record.quote.exact, next + 1)
-        }
-        matches.sort((left, right) => Math.abs(left - (range?.start ?? 0)) - Math.abs(right - (range?.start ?? 0)) || left - right)
-        start = matches[0] ?? -1
-      }
-      if (start >= 0 && record.quote.exact) {
-        range = { start, end: start + record.quote.exact.length }
+      const restored = restoreQuoteAnchor(document.text, record.quote, range?.start ?? 0)
+      if (restored && !restored.ambiguous) {
+        range = { start: restored.start, end: restored.end }
         shifted += 1
       } else {
         range = null
         orphaned += 1
       }
     }
+    const status = record.status ?? (record.resolved ? 'resolved' : 'open')
+    const offsets = range ? { start: textOffsetsAt(document.text, range.start), end: textOffsetsAt(document.text, range.end) } : null
     return {
       id: record.id,
       type: record.type,
@@ -148,11 +140,23 @@ export function restoreAnnotations(document: AnnotatedDocument): { annotations: 
       start: range?.start ?? 0,
       end: range?.end ?? 0,
       quote: record.quote.exact,
+      quotePrefix: record.quote.prefix,
+      quoteSuffix: record.quote.suffix,
       tags: record.tags,
       resolved: record.resolved,
+      status,
       color: record.color,
       created: record.created,
       modified: record.modified,
+      ...(record.author ? { author: record.author } : {}),
+      ...(record.parentId ? { parentId: record.parentId } : {}),
+      ...(record.metadata ? { metadata: record.metadata } : {}),
+      ...(offsets ? {
+        startUtf8: offsets.start.utf8,
+        endUtf8: offsets.end.utf8,
+        startGrapheme: offsets.start.grapheme,
+        endGrapheme: offsets.end.grapheme,
+      } : {}),
       orphan: range === null,
     }
   })

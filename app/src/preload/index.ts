@@ -6,6 +6,8 @@ const channelNames: Channel[] = [
   'dialog:openFolder',
   'dialog:openWorkspace',
   'dialog:chooseEncoding',
+  'dialog:importInterchange',
+  'dialog:saveExport',
   'state:get',
   'state:save',
   'dialog:saveWorkspace',

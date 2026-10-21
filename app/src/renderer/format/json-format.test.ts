@@ -32,6 +32,42 @@ describe('JSON annotated documents', () => {
     expect(restored.shifted).toBe(1)
   })
 
+  it('preserves v2 fields and derives exchange offsets without changing UTF-16 ranges', async () => {
+    const source = 'Начало 😀 цитата конец'
+    const start = source.indexOf('цитата')
+    const document = await createAnnotatedDocument(source, [{
+      ...annotation,
+      type: 'critic_comment',
+      text: 'Пояснение',
+      start,
+      end: start + 'цитата'.length,
+      quote: 'цитата',
+      status: 'archived',
+      resolved: false,
+      author: 'Редактор',
+      parentId: 'parent-note',
+      metadata: { source: 'import' },
+    }], 'chapter.txt')
+    const restored = restoreAnnotations(parseAnnotatedDocument(JSON.stringify(document))).annotations[0]!
+    expect(restored).toMatchObject({
+      type: 'critic_comment', status: 'archived', author: 'Редактор', parentId: 'parent-note',
+      metadata: { source: 'import' }, start, end: start + 'цитата'.length,
+    })
+    expect(restored.startUtf8).toBe(new TextEncoder().encode(source.slice(0, start)).length)
+  })
+
+  it('does not silently choose between equally plausible repeated quotes', async () => {
+    const source = 'цитата  цитата'
+    const document = await createAnnotatedDocument(source, [{ ...annotation, start: 0, end: 6, quote: 'цитата' }], 'chapter.txt')
+    document.text = 'новый текст: цитата  цитата'
+    document.annotations[0]!.range = { start: 17, end: 23 }
+    document.annotations[0]!.quote.prefix = ''
+    document.annotations[0]!.quote.suffix = ''
+    const restored = restoreAnnotations(document)
+    expect(restored.orphaned).toBe(1)
+    expect(restored.annotations[0]?.orphan).toBe(true)
+  })
+
   it('rejects malformed ranges rather than partially opening the file', async () => {
     const document = await createAnnotatedDocument('Коротко', [annotation], 'chapter.txt')
     document.annotations[0].range!.end = 99

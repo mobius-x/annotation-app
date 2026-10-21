@@ -15,6 +15,8 @@
   import { createLineStarts, createOutlineRows, lineNumberAt } from './editor/outline'
   import { parseTags } from './editor/annotation-tags'
   import { createAnnotatedDocument, parseAnnotatedDocument, restoreAnnotations, toPlainAnnotatedDocument } from './format/json-format'
+  import { parseExternalDocument } from './format/import-format'
+  import { exportFormats, serializeExchange, type ExchangeFormat } from '../shared/interchange'
   import { getAnnotationMarkerColor, parseShortcut, resolveTheme, settingsSchema, themes, type AppSettings, type ThemePalette, type UserTheme } from '../shared/settings'
   import Icon from './Icon.svelte'
   import FontPicker from './FontPicker.svelte'
@@ -37,6 +39,8 @@
     colors: Record<string, string>
     user: boolean
   }
+
+  const exampleDemoText = `Все счастливые семьи похожи друг на друга, каждая несчастливая семья несчастлива по-своему.\n\nВ доме Облонских все смешалось. Жена узнала, что муж был в связи с бывшею в их доме француженкою-гувернанткой, и объявила мужу, что не может жить с ним в одном доме.\n\nПоложение это продолжалось уже третий день и мучительно чувствовалось и самими супругами, и всеми членами семьи, и домочадцами.\n\nВыделите любой фрагмент текста, чтобы создать аннотацию. Этот демо-текст можно использовать для знакомства с редактором.`
 
   interface DocumentTab {
     id: string
@@ -159,6 +163,7 @@
   let noteType = $state('comment')
   let query = $state('')
   let filterType = $state('all')
+  let filterStatus = $state('all')
   let hideResolved = $state(false)
   let tagDrafts = $state<Record<string, string>>({})
   let showOrphans = $state(true)
@@ -184,6 +189,11 @@
   let annotationHeights = $state<Record<string, number>>({})
   let showAnnotations = $state(true)
   let showSettings = $state(false)
+  let showExportPicker = $state(false)
+  let showPasteDialog = $state(false)
+  let pasteDraft = $state('')
+  let pasteInput = $state<HTMLTextAreaElement>()
+  let selectedExportFormat = $state<ExchangeFormat>('markdown')
   let settings = $state<AppSettings>(settingsSchema.parse({}))
   let lastSavedDocument: AnnotatedDocument | undefined
   let suppressEditorUpdate = false
@@ -294,10 +304,16 @@
   const annotationTypes = [
     { id: 'comment', label: 'Комментарий' },
     { id: 'note', label: 'Заметка' },
+    { id: 'highlight', label: 'Подсветка' },
     { id: 'question', label: 'Вопрос' },
     { id: 'idea', label: 'Идея' },
     { id: 'todo', label: 'Задача' },
     { id: 'important', label: 'Важно' },
+    { id: 'critic_add', label: 'CriticMarkup: добавление' },
+    { id: 'critic_del', label: 'CriticMarkup: удаление' },
+    { id: 'critic_sub', label: 'CriticMarkup: замена' },
+    { id: 'critic_comment', label: 'CriticMarkup: комментарий' },
+    { id: 'critic_highlight', label: 'CriticMarkup: подсветка' },
   ]
   const annotationPluralRules = new Intl.PluralRules('ru')
   const markdownParser = new MarkdownIt({ html: false, linkify: true, breaks: true })
@@ -312,6 +328,10 @@
     { id: 'view.focusMode', label: 'Переключить режим фокуса', shortcut: 'F9' },
     { id: 'file.save', label: 'Сохранить', shortcut: 'Ctrl+S' },
     { id: 'file.saveAs', label: 'Сохранить как…', shortcut: 'Ctrl+Shift+S' },
+    { id: 'file.import', label: 'Импортировать аннотированный файл', shortcut: null },
+    { id: 'file.export', label: 'Экспортировать документ', shortcut: null },
+    { id: 'file.demo', label: 'Открыть демо-текст', shortcut: null },
+    { id: 'file.paste', label: 'Создать документ из вставленного текста', shortcut: null },
     { id: 'workspace.openFolder', label: 'Открыть папку', shortcut: 'Ctrl+K Ctrl+O' },
     { id: 'file.new', label: 'Новый документ', shortcut: 'Ctrl+N' },
     { id: 'tab.close', label: 'Закрыть вкладку', shortcut: 'Ctrl+W' },
@@ -356,6 +376,12 @@
     'annot.idea': 'Идея',
     'annot.todo': 'Задача',
     'annot.important': 'Важно',
+    'annot.highlight': 'Подсветка',
+    'annot.critic_add': 'CriticMarkup: добавление',
+    'annot.critic_del': 'CriticMarkup: удаление',
+    'annot.critic_sub': 'CriticMarkup: замена',
+    'annot.critic_comment': 'CriticMarkup: комментарий',
+    'annot.critic_highlight': 'CriticMarkup: подсветка',
   }
   const visibleCommands = $derived(commandDefinitions.filter((command) =>
     `${command.label} ${command.id}`.toLocaleLowerCase('ru').includes(commandPaletteQuery.toLocaleLowerCase('ru'))))
@@ -476,6 +502,7 @@
   const visibleAnnotations = $derived(
     [...annotations]
       .filter((annotation) => filterType === 'all' || annotation.type === filterType)
+      .filter((annotation) => filterStatus === 'all' || (annotation.status ?? (annotation.resolved ? 'resolved' : 'open')) === filterStatus)
       .filter((annotation) => !hideResolved || !annotation.resolved)
       .filter((annotation) => !query || `${annotation.type} ${annotation.text} ${annotation.quote} ${annotation.tags.join(' ')}`.toLocaleLowerCase('ru').includes(query.toLocaleLowerCase('ru')))
       .sort((left, right) => Number(Boolean(left.orphan)) - Number(Boolean(right.orphan)) || (
@@ -724,6 +751,10 @@
       case 'view.focusMode': setFocusMode(!focusMode); break
       case 'file.save': await save(); break
       case 'file.saveAs': await save(true); break
+      case 'file.import': await importInterchange(); break
+      case 'file.export': showExportPicker = true; break
+      case 'file.demo': await openDemoDocument(); break
+      case 'file.paste': showPasteDialog = true; pasteDraft = ''; await tick(); pasteInput?.focus(); break
       case 'workspace.openFolder': await openFolder(); break
       case 'file.new': await newFile(); break
       case 'tab.close': requestCloseTab(); break
@@ -1741,6 +1772,96 @@
     return createAnnotatedDocument(text, annotations, source, lastSavedDocument, sourceEol)
   }
 
+  async function exportCurrentDocument(format: ExchangeFormat): Promise<void> {
+    try {
+      const document = await createAnnotatedDocument(text, annotations, filePath?.split(/[\\/]/).at(-1) ?? null, lastSavedDocument, eol === '\r\n' ? 'crlf' : eol === '\r' ? 'cr' : 'lf')
+      const content = await serializeExchange(document, format)
+      const result = await invoke<string | null>('dialog:saveExport', { format, content })
+      if (result) status = `Экспорт сохранён: ${result.split(/[\\/]/).at(-1)}`
+      showExportPicker = false
+    } catch (error) {
+      status = `Не удалось экспортировать документ: ${error instanceof Error ? error.message : String(error)}`
+    }
+  }
+
+  async function importInterchange(): Promise<void> {
+    try {
+      const selected = await invoke<{ name: string; path: string; content: string | Uint8Array } | null>('dialog:importInterchange')
+      if (!selected) return
+      const document = await parseExternalDocument(selected.name, typeof selected.content === 'string' ? selected.content : new TextDecoder().decode(selected.content), typeof selected.content === 'string' ? undefined : selected.content)
+      const restored = restoreAnnotations(document)
+      captureActiveTab()
+      activeTabId = `import:${crypto.randomUUID()}`
+      filePath = null
+      annotationPath = null
+      text = document.text
+      originalText = document.text
+      encoding = 'utf-8'
+      eol = '\n'
+      hasBom = false
+      annotations = restored.annotations
+      selectedId = null
+      dirty = true
+      lastSavedDocument = document
+      revision += 1
+      focusMode = false
+      suppressEditorUpdate = true
+      editor?.dispatch({
+        changes: { from: 0, to: editor.state.doc.length, insert: text },
+        effects: [setAnnotationRanges.of(annotations), setFocusView.of(focusViewOptions(false)), focusCompartment.reconfigure([])],
+      })
+      suppressEditorUpdate = false
+      tabs = [...tabs, createCurrentTab(activeTabId)]
+      const warnings = restored.orphaned ? `; ${restored.orphaned} без привязки` : restored.shifted ? `; сдвинуто ${restored.shifted}` : ''
+      status = `Импортирован новый документ «${selected.name}»${warnings}`
+    } catch (error) {
+      status = `Не удалось импортировать файл: ${error instanceof Error ? error.message : String(error)}`
+    }
+  }
+
+  async function openDemoDocument(): Promise<void> {
+    if (dirty) {
+      const proceed = await askConfirm({
+        title: 'Открыть демо-текст?',
+        message: 'Текущий документ останется открытым в своей вкладке. Будет создана новая вкладка с примером.',
+        confirmLabel: 'Открыть пример',
+      })
+      if (proceed !== 'confirm') return
+    }
+    captureActiveTab()
+    filePath = null
+    annotationPath = null
+    text = exampleDemoText
+    originalText = exampleDemoText
+    annotations = []
+    selectedId = null
+    dirty = false
+    lastSavedDocument = undefined
+    revision += 1
+    activeTabId = `demo:${crypto.randomUUID()}`
+    suppressEditorUpdate = true
+    editor?.dispatch({ changes: { from: 0, to: editor.state.doc.length, insert: text }, effects: [setAnnotationRanges.of([])] })
+    suppressEditorUpdate = false
+    tabs = [...tabs, createCurrentTab(activeTabId)]
+    status = 'Демо-текст открыт в новой вкладке'
+  }
+
+  async function createDocumentFromPaste(): Promise<void> {
+    if (!pasteDraft.trim()) return
+    await newFile()
+    if (!activeTabId) return
+    text = pasteDraft
+    originalText = null
+    dirty = true
+    revision += 1
+    suppressEditorUpdate = true
+    editor?.dispatch({ changes: { from: 0, to: editor.state.doc.length, insert: text }, effects: [setAnnotationRanges.of([])] })
+    suppressEditorUpdate = false
+    tabs = tabs.map((tab) => tab.id === activeTabId ? createCurrentTab(activeTabId) : tab)
+    status = 'Создан новый документ из вставленного текста'
+    showPasteDialog = false
+  }
+
   async function save(saveAs = false): Promise<void> {
     if (savingTabId) return
     if (!dirty && !saveAs) return
@@ -1909,8 +2030,11 @@
   }
 
   function updateAnnotation(id: string, changes: Partial<Annotation>, undoable = false): void {
+    const normalizedChanges = changes.resolved === undefined || changes.status !== undefined
+      ? changes
+      : { ...changes, status: changes.resolved ? 'resolved' as const : 'open' as const }
     annotations = annotations.map((annotation) => annotation.id === id
-      ? { ...annotation, ...changes, modified: new Date().toISOString() }
+      ? { ...annotation, ...normalizedChanges, modified: new Date().toISOString() }
       : annotation)
     syncRanges(undoable)
     markDirty()
@@ -2346,6 +2470,9 @@
       <button class="bar-button" onclick={() => void openWorkspace()} title="Открыть workspace" aria-label="Открыть workspace">
         <Icon name="layers" size={17} /><span class="bar-label">Workspace</span>
       </button>
+      <button class="bar-button" onclick={() => void importInterchange()} title="Импортировать файл с аннотациями" aria-label="Импортировать файл с аннотациями">
+        <Icon name="file-text" size={17} /><span class="bar-label">Импорт</span>
+      </button>
     </div>
 
     <span class="bar-divider" aria-hidden="true"></span>
@@ -2358,6 +2485,9 @@
 
     <button class="primary-action" onclick={() => void createAnnotation()} title="Создать аннотацию из выделения (Ctrl+Shift+A)" aria-label="Создать аннотацию из выделения">
       <Icon name="message-plus" size={17} /><span class="action-label">Аннотация</span>
+    </button>
+    <button class="bar-button" onclick={() => showExportPicker = true} title="Экспортировать документ" aria-label="Экспортировать документ">
+      <Icon name="save-as" size={17} /><span class="bar-label">Экспорт</span>
     </button>
 
     <div class="bar-group bar-end" role="group" aria-label="Сохранение и вид">
@@ -2704,6 +2834,12 @@
               </select>
               <Icon name="chevron-down" size={12} />
             </label>
+            <label class="select-wrap compact" title="Фильтр по статусу">
+              <select bind:value={filterStatus} onchange={() => { annotationScrollTop = 0; if (annotationScrollHost) annotationScrollHost.scrollTop = 0 }} aria-label="Фильтр по статусу">
+                <option value="all">Все статусы</option><option value="open">Открытые</option><option value="resolved">Решённые</option><option value="archived">Архив</option>
+              </select>
+              <Icon name="chevron-down" size={12} />
+            </label>
             <button class="filter-toggle" class:active={hideResolved} aria-pressed={hideResolved} onclick={() => { hideResolved = !hideResolved; annotationScrollTop = 0; if (annotationScrollHost) annotationScrollHost.scrollTop = 0 }}>
               <Icon name="check-circle" size={13} /><span>Без решённых</span>
             </button>
@@ -2834,6 +2970,13 @@
                   </select>
                   <Icon name="chevron-down" size={11} />
                 </label>
+                <label class="select-wrap type-select-wrap">
+                  <span class="visually-hidden">Статус аннотации</span>
+                  <select aria-label="Статус аннотации" value={annotation.status ?? (annotation.resolved ? 'resolved' : 'open')} onclick={(event) => event.stopPropagation()} onchange={(event) => updateAnnotation(annotation.id, { status: event.currentTarget.value as 'open' | 'resolved' | 'archived', resolved: event.currentTarget.value === 'resolved' }, true)}>
+                    <option value="open">Открыта</option><option value="resolved">Решена</option><option value="archived">Архив</option>
+                  </select>
+                  <Icon name="chevron-down" size={11} />
+                </label>
                 {#if annotation.orphan}
                   <span class="line-badge is-orphan">Без привязки</span>
                 {:else}
@@ -2920,6 +3063,41 @@
     {/if}
   </div>
 </div>
+
+{#if showPasteDialog}
+  <div class="modal-backdrop">
+    <dialog open class="dialog export-dialog" aria-modal="true" aria-labelledby="paste-title" use:modalDialog>
+      <div class="dialog-header"><div class="dialog-heading"><h2 id="paste-title">Новый документ из текста</h2><p>Текущая вкладка останется открытой.</p></div>
+        <button class="icon-button" aria-label="Закрыть" onclick={() => showPasteDialog = false}><Icon name="x" size={16} /></button></div>
+      <label class="settings-field"><span>Текст</span><textarea bind:this={pasteInput} bind:value={pasteDraft} rows="12" placeholder="Вставьте или напишите текст…"></textarea></label>
+      <footer class="dialog-footer"><button class="button" onclick={() => showPasteDialog = false}>Отмена</button><button class="button primary" disabled={!pasteDraft.trim()} onclick={() => void createDocumentFromPaste()}>Создать вкладку</button></footer>
+    </dialog>
+  </div>
+{/if}
+
+{#if showExportPicker}
+  <div class="modal-backdrop">
+    <dialog open class="dialog export-dialog" aria-modal="true" aria-labelledby="export-title" use:modalDialog>
+      <div class="dialog-header">
+        <div class="dialog-heading">
+          <h2 id="export-title">Экспортировать документ</h2>
+          <p>Текст и аннотации будут сохранены в выбранном формате.</p>
+        </div>
+        <button class="icon-button" aria-label="Закрыть экспорт" onclick={() => showExportPicker = false}><Icon name="x" size={16} /></button>
+      </div>
+      <label class="settings-field">
+        <span>Формат</span>
+        <select bind:value={selectedExportFormat} aria-label="Формат экспорта">
+          {#each exportFormats as format (format.id)}<option value={format.id}>{format.label} .{format.extension}</option>{/each}
+        </select>
+      </label>
+      <footer class="dialog-footer">
+        <button class="button" onclick={() => showExportPicker = false}>Отмена</button>
+        <button class="button primary" onclick={() => void exportCurrentDocument(selectedExportFormat)}>Экспортировать</button>
+      </footer>
+    </dialog>
+  </div>
+{/if}
 
 {#if showSettings}
   <div class="modal-backdrop">
@@ -3219,7 +3397,7 @@
                 <p>Отдельные цвета можно переопределить поверх выбранной темы. Сброс возвращает исходное значение.</p>
               </div>
               <div class="color-list">
-                {#each ['ui.bg', 'ui.fg', 'ui.fgMuted', 'ui.accent', 'ui.border', 'editor.bg', 'editor.fg', 'editor.selection', 'annot.default', 'annot.comment', 'annot.note', 'annot.question', 'annot.idea', 'annot.todo', 'annot.important'] as colorKey (colorKey)}
+                {#each ['ui.bg', 'ui.fg', 'ui.fgMuted', 'ui.accent', 'ui.border', 'editor.bg', 'editor.fg', 'editor.selection', 'annot.default', 'annot.comment', 'annot.note', 'annot.highlight', 'annot.question', 'annot.idea', 'annot.todo', 'annot.important', 'annot.critic_add', 'annot.critic_del', 'annot.critic_sub', 'annot.critic_comment', 'annot.critic_highlight'] as colorKey (colorKey)}
                   <div class="color-row">
                     <span class="color-label">{colorLabels[colorKey] ?? colorKey}</span>
                     <span class="color-controls">

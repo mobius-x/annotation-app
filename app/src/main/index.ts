@@ -1246,6 +1246,42 @@ function registerIpc(): void {
     }
   })
   installHandler('dialog:openWorkspace', () => openWorkspaceFile())
+  installHandler('dialog:importInterchange', async () => {
+    if (!mainWindow) return null
+    const result = await dialog.showOpenDialog(mainWindow, {
+      properties: ['openFile'],
+      filters: [{ name: 'Форматы аннотаций', extensions: ['json', 'md', 'html', 'htm', 'critic.md', 'web-annotation.json', 'hypothesis.json', 'docx', 'epub'] }, { name: 'Все файлы', extensions: ['*'] }],
+    })
+    if (result.canceled || !result.filePaths[0]) return null
+    const filePath = path.resolve(result.filePaths[0])
+    allowedRoots.add(path.dirname(filePath))
+    const bytes = await fs.readFile(filePath)
+    if (bytes.byteLength > 50 * 1024 * 1024) throw new Error('Импортируемый файл превышает ограничение 50 МБ.')
+    return { name: path.basename(filePath), path: filePath, content: (filePath.toLowerCase().endsWith('.docx') || filePath.toLowerCase().endsWith('.epub')) ? new Uint8Array(bytes) : bytes.toString('utf8') }
+  })
+  installHandler('dialog:saveExport', async ({ format, content }) => {
+    if (!mainWindow) return null
+    const formats = {
+      markdown: { extension: 'md', name: 'Markdown' }, html: { extension: 'html', name: 'HTML' },
+      'combined-txt': { extension: 'txt', name: 'Комбинированный TXT' }, json: { extension: 'json', name: 'JSON' },
+      'critic-markup': { extension: 'critic.md', name: 'CriticMarkup' }, csv: { extension: 'csv', name: 'CSV' },
+      tsv: { extension: 'tsv', name: 'TSV' }, w3c: { extension: 'web-annotation.json', name: 'W3C Web Annotation' },
+      pandoc: { extension: 'pandoc.json', name: 'Pandoc AST' }, tei: { extension: 'tei.xml', name: 'TEI XML' },
+      obsidian: { extension: 'md', name: 'Obsidian / Logseq' }, hypothesis: { extension: 'hypothesis.json', name: 'Hypothesis JSON' },
+      docx: { extension: 'docx', name: 'DOCX' }, epub: { extension: 'epub', name: 'EPUB' },
+      sqlite: { extension: 'sqlite', name: 'SQLite' }, duckdb: { extension: 'duckdb', name: 'DuckDB' },
+    } as const
+    const definition = formats[format]
+    const result = await dialog.showSaveDialog(mainWindow, {
+      defaultPath: `annotator-export.${definition.extension}`,
+      filters: [{ name: definition.name, extensions: [definition.extension] }],
+    })
+    if (result.canceled || !result.filePath) return null
+    const target = path.resolve(result.filePath)
+    allowedRoots.add(path.dirname(target))
+    await atomicWrite(target, typeof content === 'string' ? Buffer.from(content, 'utf8') : Buffer.from(content))
+    return target
+  })
   installHandler('state:get', async () => {
     const result = await readAppState()
     for (const directory of result.state.folders) {

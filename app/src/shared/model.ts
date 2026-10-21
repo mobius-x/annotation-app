@@ -5,11 +5,21 @@ export interface Annotation {
   start: number
   end: number
   quote: string
+  quotePrefix?: string
+  quoteSuffix?: string
   tags: string[]
   resolved: boolean
+  status?: 'open' | 'resolved' | 'archived'
   color: string | null
   created: string
   modified: string
+  author?: string
+  parentId?: string
+  metadata?: Record<string, unknown>
+  startUtf8?: number
+  endUtf8?: number
+  startGrapheme?: number
+  endGrapheme?: number
   orphan?: boolean
 }
 
@@ -39,8 +49,12 @@ export interface StoredAnnotation {
   tags: string[]
   color: string | null
   resolved: boolean
+  status?: 'open' | 'resolved' | 'archived'
   created: string
   modified: string
+  author?: string
+  parentId?: string
+  metadata?: Record<string, unknown>
   [key: string]: unknown
 }
 

@@ -831,6 +831,11 @@ kbd {
 .annot-idea { background: color-mix(in srgb, var(--annot-idea) var(--annot-alpha, 18%), transparent); }
 .annot-todo { background: color-mix(in srgb, var(--annot-todo) var(--annot-alpha, 18%), transparent); }
 .annot-important { background: color-mix(in srgb, var(--annot-important) var(--annot-alpha, 18%), transparent); }
+.annot-highlight, .annot-critic_highlight { background: color-mix(in srgb, var(--annot-dot-highlight, var(--annot-default)) var(--annot-alpha, 18%), transparent); }
+.annot-critic_add { background: color-mix(in srgb, var(--annot-dot-critic_add, var(--annot-idea)) var(--annot-alpha, 18%), transparent); }
+.annot-critic_del { background: color-mix(in srgb, var(--annot-dot-critic_del, var(--annot-todo)) var(--annot-alpha, 18%), transparent); }
+.annot-critic_sub { background: color-mix(in srgb, var(--annot-dot-critic_sub, var(--annot-question)) var(--annot-alpha, 18%), transparent); }
+.annot-critic_comment { background: color-mix(in srgb, var(--annot-dot-critic_comment, var(--annot-comment)) var(--annot-alpha, 18%), transparent); }
 
 /* ------------------------------------------------------------------ */
 /* Welcome                                                             */
@@ -1226,6 +1231,12 @@ kbd {
 .annot-dot-idea { background: var(--annot-dot-idea, var(--annot-idea)); }
 .annot-dot-todo { background: var(--annot-dot-todo, var(--annot-todo)); }
 .annot-dot-important { background: var(--annot-dot-important, var(--annot-important)); }
+.annot-dot-highlight { background: var(--annot-dot-highlight, var(--annot-default)); }
+.annot-dot-critic_add { background: var(--annot-dot-critic_add, var(--annot-idea)); }
+.annot-dot-critic_del { background: var(--annot-dot-critic_del, var(--annot-todo)); }
+.annot-dot-critic_sub { background: var(--annot-dot-critic_sub, var(--annot-question)); }
+.annot-dot-critic_comment { background: var(--annot-dot-critic_comment, var(--annot-comment)); }
+.annot-dot-critic_highlight { background: var(--annot-dot-critic_highlight, var(--annot-default)); }
 
 .note-composer textarea {
   width: 100%;
@@ -1308,6 +1319,12 @@ kbd {
 .annotation-card.annot-card-idea { border-left-color: var(--annot-dot-idea, var(--annot-idea)); }
 .annotation-card.annot-card-todo { border-left-color: var(--annot-dot-todo, var(--annot-todo)); }
 .annotation-card.annot-card-important { border-left-color: var(--annot-dot-important, var(--annot-important)); }
+.annotation-card.annot-card-highlight { border-left-color: var(--annot-dot-highlight, var(--annot-default)); }
+.annotation-card.annot-card-critic_add { border-left-color: var(--annot-dot-critic_add, var(--annot-idea)); }
+.annotation-card.annot-card-critic_del { border-left-color: var(--annot-dot-critic_del, var(--annot-todo)); }
+.annotation-card.annot-card-critic_sub { border-left-color: var(--annot-dot-critic_sub, var(--annot-question)); }
+.annotation-card.annot-card-critic_comment { border-left-color: var(--annot-dot-critic_comment, var(--annot-comment)); }
+.annotation-card.annot-card-critic_highlight { border-left-color: var(--annot-dot-critic_highlight, var(--annot-default)); }
 
 .card-heading { display: flex; align-items: center; gap: 5px; min-height: 26px; }
 .card-heading > .type-dot { margin-right: 1px; }

@@ -5,6 +5,11 @@ export const channelSchemas = {
   'dialog:openFolder': z.object({ add: z.boolean().default(false) }),
   'dialog:openWorkspace': z.void(),
   'dialog:chooseEncoding': z.object({ current: z.string().min(1) }),
+  'dialog:importInterchange': z.void(),
+  'dialog:saveExport': z.object({
+    format: z.enum(['markdown', 'html', 'combined-txt', 'json', 'critic-markup', 'csv', 'tsv', 'w3c', 'pandoc', 'tei', 'obsidian', 'hypothesis', 'docx', 'epub', 'sqlite', 'duckdb']),
+    content: z.union([z.string(), z.instanceof(Uint8Array)]),
+  }),
   'state:get': z.void(),
   'state:save': z.object({
     folders: z.array(z.string()),

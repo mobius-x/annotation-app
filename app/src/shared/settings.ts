@@ -67,10 +67,16 @@ export const settingsSchema = z.object({
     }).passthrough()).default([
       { id: 'comment', label: 'Комментарий', color: null },
       { id: 'note', label: 'Заметка', color: null },
+      { id: 'highlight', label: 'Подсветка', color: null },
       { id: 'question', label: 'Вопрос', color: null },
       { id: 'idea', label: 'Идея', color: null },
       { id: 'todo', label: 'Задача', color: null },
       { id: 'important', label: 'Важно', color: null },
+      { id: 'critic_add', label: 'CriticMarkup: добавление', color: null },
+      { id: 'critic_del', label: 'CriticMarkup: удаление', color: null },
+      { id: 'critic_sub', label: 'CriticMarkup: замена', color: null },
+      { id: 'critic_comment', label: 'CriticMarkup: комментарий', color: null },
+      { id: 'critic_highlight', label: 'CriticMarkup: подсветка', color: null },
     ]),
     defaultType: z.string().default('comment'),
   }).passthrough().default({
@@ -80,10 +86,16 @@ export const settingsSchema = z.object({
     types: [
       { id: 'comment', label: 'Комментарий', color: null },
       { id: 'note', label: 'Заметка', color: null },
+      { id: 'highlight', label: 'Подсветка', color: null },
       { id: 'question', label: 'Вопрос', color: null },
       { id: 'idea', label: 'Идея', color: null },
       { id: 'todo', label: 'Задача', color: null },
       { id: 'important', label: 'Важно', color: null },
+      { id: 'critic_add', label: 'CriticMarkup: добавление', color: null },
+      { id: 'critic_del', label: 'CriticMarkup: удаление', color: null },
+      { id: 'critic_sub', label: 'CriticMarkup: замена', color: null },
+      { id: 'critic_comment', label: 'CriticMarkup: комментарий', color: null },
+      { id: 'critic_highlight', label: 'CriticMarkup: подсветка', color: null },
     ],
     defaultType: 'comment',
   }),
@@ -133,7 +145,7 @@ export interface ThemePalette {
   colors: Record<string, string>
 }
 
-const annotationTypeIds = ['comment', 'note', 'question', 'idea', 'todo', 'important'] as const
+const annotationTypeIds = ['comment', 'note', 'question', 'idea', 'todo', 'important', 'highlight', 'critic_add', 'critic_del', 'critic_sub', 'critic_comment', 'critic_highlight'] as const
 
 export const themes: Record<string, ThemePalette> = {
   dracula: {
@@ -211,6 +223,15 @@ Object.assign(themes, {
 })
 themes['solarized-light']!.colors['ui.fg'] = '#52666d'
 themes['solarized-light']!.colors['ui.fgMuted'] = '#52666d'
+
+const relatedAnnotationColors: Record<string, string> = {
+  highlight: 'default', critic_add: 'idea', critic_del: 'todo', critic_sub: 'question', critic_comment: 'comment', critic_highlight: 'default',
+}
+for (const theme of Object.values(themes)) {
+  for (const [type, source] of Object.entries(relatedAnnotationColors)) {
+    theme.colors[`annot.${type}`] ??= theme.colors[`annot.${source}`]!
+  }
+}
 
 for (const theme of Object.values(themes)) {
   const background = theme.colors['editor.bg']!
@@ -299,7 +320,7 @@ export function resolveTheme(themeId: string, overrides: Record<string, string> 
   colors['editor.caret'] ??= colors['editor.fg']!
   colors['editor.lineHighlight'] ??= colors['editor.selection']!
   colors['editor.gutterFg'] ??= colors['ui.fgMuted']!
-  for (const key of ['comment', 'note', 'question', 'idea', 'todo', 'important']) {
+  for (const key of annotationTypeIds) {
     colors[`annot.${key}`] ??= colors['annot.default']!
   }
   colors['annot.cardBg'] ??= colors['ui.bg']!
