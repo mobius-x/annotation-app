@@ -58,6 +58,7 @@
   let children = $state<Record<string, FileEntry[]>>({})
   let dirty = $state(false)
   let status = $state('Готово')
+  let cursorPosition = $state({ line: 1, column: 1 })
   let noteDraft = $state('')
   let noteType = $state('comment')
   let query = $state('')
@@ -91,6 +92,7 @@
     { id: 'todo', label: 'Задача' },
     { id: 'important', label: 'Важно' },
   ]
+  const annotationPluralRules = new Intl.PluralRules('ru')
   const markdownParser = new MarkdownIt({ html: false, linkify: true, breaks: true })
   const outlineRows = $derived(createOutlineRows(annotations, createLineStarts(text)))
   const outlineRowHeight = 38
@@ -177,6 +179,11 @@
       effects: setAnnotationRanges.of(annotations),
       annotations: Transaction.addToHistory.of(undoable),
     })
+  }
+
+  function updateCursorPosition(state: EditorState): void {
+    const cursor = state.doc.lineAt(state.selection.main.head)
+    cursorPosition = { line: cursor.number, column: state.selection.main.head - cursor.from + 1 }
   }
 
   function rangeUpdate(ranges: Annotation[]): void {
@@ -292,6 +299,7 @@
         head: Math.min(tab.selection.head, text.length),
       },
     })
+    if (editor) updateCursorPosition(editor.state)
     focusMode = tab.focusMode
     suppressEditorUpdate = false
     editor?.focus()
@@ -420,6 +428,7 @@
     hasBom = file.hasBom
     originalText = file.originalText ?? null
     annotations = []
+    cursorPosition = { line: 1, column: 1 }
     lastSavedDocument = undefined
     pendingSelection = { from: 0, to: 0 }
     let loadMessage = file.path.split(/[\\/]/).at(-1) ?? 'Документ открыт'
@@ -441,6 +450,7 @@
       suppressEditorUpdate = true
       editor.dispatch({ changes: { from: 0, to: editor.state.doc.length, insert: text } })
       syncRanges()
+      updateCursorPosition(editor.state)
       suppressEditorUpdate = false
       editor.focus()
     }
@@ -902,6 +912,7 @@
       EditorView.cspNonce.of(document.querySelector<HTMLMetaElement>('meta[name="csp-nonce"]')?.content ?? ''),
       EditorView.updateListener.of((update) => {
         if (suppressEditorUpdate) return
+        if (update.selectionSet || update.docChanged) updateCursorPosition(update.state)
         if (update.docChanged) {
           text = update.state.doc.toString()
           markDirty()
@@ -1163,7 +1174,8 @@
         {/if}
         <span>{encoding.toUpperCase()}</span>
         <span>{eol === '\r\n' ? 'CRLF' : eol === '\r' ? 'CR' : 'LF'}</span>
-        <span>{annotations.length} {annotations.length === 1 ? 'аннотация' : 'аннотаций'}</span>
+        <span>Стр. {cursorPosition.line}, стлб. {cursorPosition.column}</span>
+        <span>{annotations.length} {annotationPluralRules.select(annotations.length) === 'one' ? 'аннотация' : annotationPluralRules.select(annotations.length) === 'few' ? 'аннотации' : 'аннотаций'}</span>
         <span class="status-message">{status}</span>
       </footer>
     </main>
