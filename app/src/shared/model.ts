@@ -57,6 +57,7 @@ export interface OpenedFile {
   encoding: string
   eol: '\n' | '\r\n' | '\r'
   hasBom: boolean
+  originalText?: string | null
   annotationDocument?: unknown
   annotationPath?: string | null
 }
@@ -74,6 +75,14 @@ export interface SaveRequest {
   eol: string
   hasBom: boolean
   document: AnnotatedDocument | null
+}
+
+export interface ApplyTextRequest {
+  path: string
+  text: string
+  encoding: string
+  eol: string
+  hasBom: boolean
 }
 
 export interface RecoverySnapshot {

@@ -23,6 +23,7 @@
     encoding: string
     eol: '\n' | '\r\n' | '\r'
     hasBom: boolean
+    originalText: string | null
     annotations: Annotation[]
     selectedId: string | null
     dirty: boolean
@@ -48,6 +49,7 @@
   let encoding = $state('utf-8')
   let eol = $state<'\n' | '\r\n' | '\r'>('\n')
   let hasBom = $state(false)
+  let originalText = $state<string | null>(null)
   let annotations = $state<Annotation[]>([])
   let selectedId = $state<string | null>(null)
   let folder = $state<string | null>(null)
@@ -207,6 +209,7 @@
       encoding,
       eol,
       hasBom,
+      originalText,
       annotations,
       selectedId,
       dirty,
@@ -231,6 +234,7 @@
       encoding,
       eol,
       hasBom,
+      originalText,
       annotations,
       selectedId,
       dirty,
@@ -260,6 +264,7 @@
     encoding = tab.encoding
     eol = tab.eol
     hasBom = tab.hasBom
+    originalText = tab.originalText
     annotations = tab.annotations
     selectedId = tab.selectedId
     dirty = tab.dirty
@@ -298,6 +303,28 @@
     const affected = tabs.filter((tab) => [tab.path, tab.annotationPath]
       .some((candidate) => candidate?.toLocaleLowerCase('ru') === resolved))
     if (!affected.length) return
+    const sourceChanged = affected.some((tab) =>
+      tab.annotationPath &&
+      tab.path &&
+      tab.path.toLocaleLowerCase('ru') === resolved &&
+      tab.annotationPath.toLocaleLowerCase('ru') !== resolved)
+    if (sourceChanged) {
+      try {
+        const latest = await invoke<OpenedFile>('fs:read', { path: changedPath })
+        const latestOriginal = latest.text.replace(/\r\n?|\n/g, '\n')
+        tabs = tabs.map((tab) => affected.some((item) => item.id === tab.id)
+          ? { ...tab, originalText: latestOriginal, status: 'Исходный файл изменён вне приложения' }
+          : tab)
+        if (affected.some((tab) => tab.id === activeTabId)) {
+          originalText = latestOriginal
+          status = 'Исходный файл изменён вне приложения'
+          captureActiveTab()
+        }
+      } catch (error) {
+        status = `Не удалось проверить внешний исходник: ${error instanceof Error ? error.message : String(error)}`
+      }
+      return
+    }
     tabs = tabs.map((tab) => affected.some((item) => item.id === tab.id) && !tab.externalChangePaths.includes(changedPath)
       ? { ...tab, externalChangePaths: [...tab.externalChangePaths, changedPath], status: 'Файл изменён вне приложения' }
       : tab)
@@ -392,6 +419,7 @@
     encoding = file.encoding
     eol = file.eol
     hasBom = file.hasBom
+    originalText = file.originalText ?? null
     annotations = []
     lastSavedDocument = undefined
     pendingSelection = { from: 0, to: 0 }
@@ -481,6 +509,7 @@
     encoding = 'utf-8'
     eol = '\n'
     hasBom = false
+    originalText = null
     annotations = []
     lastSavedDocument = undefined
     revision += 1
@@ -578,6 +607,7 @@
       if (!savedFile) return
       filePath = savedFile.path
       annotationPath = savedFile.annotationPath
+      if (savedFromPath !== savedFile.path && document) originalText = text
       lastSavedDocument = document ?? undefined
       dirty = revision !== savedRevision
       status = dirty ? 'Документ изменён во время сохранения' : 'Сохранено'
@@ -592,6 +622,25 @@
       status = `Ошибка сохранения: ${error instanceof Error ? error.message : String(error)}`
     } finally {
       savingTabId = null
+    }
+  }
+
+  async function applyTextToSource(): Promise<void> {
+    if (!filePath || !annotationPath || filePath === annotationPath) return
+    if (!window.confirm('Заменить исходный файл текущим текстом? Перед записью будет создана резервная копия .bak.')) return
+    try {
+      await invoke('fs:applyText', {
+        path: filePath,
+        text,
+        encoding,
+        eol,
+        hasBom,
+      })
+      originalText = text
+      status = 'Текст применён к исходному файлу; резервная копия создана'
+      captureActiveTab()
+    } catch (error) {
+      status = `Не удалось обновить исходный файл: ${error instanceof Error ? error.message : String(error)}`
     }
   }
 
@@ -1108,6 +1157,11 @@
       <div class="editor-surface" bind:this={editorHost}></div>
       <footer class="statusbar">
         <span>{dirty ? '● Не сохранено' : '✓ Сохранено'}</span>
+        {#if annotationPath && filePath !== annotationPath && originalText !== null && originalText !== text}
+          <button class="source-diff" onclick={() => void applyTextToSource()} title="Создать резервную копию .bak и применить текст к исходному файлу">
+            Текст отличается от исходника · Применить
+          </button>
+        {/if}
         <span>{encoding.toUpperCase()}</span>
         <span>{eol === '\r\n' ? 'CRLF' : eol === '\r' ? 'CR' : 'LF'}</span>
         <span>{annotations.length} {annotations.length === 1 ? 'аннотация' : 'аннотаций'}</span>

@@ -7,6 +7,7 @@ const channelNames: Channel[] = [
   'fs:list',
   'fs:read',
   'fs:watchAck',
+  'fs:applyText',
   'fs:save',
   'settings:get',
   'settings:save',

@@ -6,6 +6,13 @@ export const channelSchemas = {
   'fs:list': z.object({ path: z.string().min(1) }),
   'fs:read': z.object({ path: z.string().min(1) }),
   'fs:watchAck': z.object({ path: z.string().min(1) }),
+  'fs:applyText': z.object({
+    path: z.string().min(1),
+    text: z.string(),
+    encoding: z.string(),
+    eol: z.enum(['\n', '\r\n', '\r']),
+    hasBom: z.boolean(),
+  }),
   'fs:save': z.object({
     path: z.string().nullable(),
     annotationPath: z.string().nullable(),

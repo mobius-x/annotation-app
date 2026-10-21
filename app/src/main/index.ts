@@ -10,7 +10,7 @@ import iconv from 'iconv-lite'
 import { channelNames, channelSchemas, type Channel } from '../shared/ipc-contract'
 import { defaultSettings, settingsSchema, themes } from '../shared/settings'
 import { parseMarkdownDocument, serializeMarkdownDocument } from '../shared/markdown-format'
-import type { AnnotatedDocument, FileEntry, OpenedFile, RecoverySnapshot, SaveRequest, SavedFile } from '../shared/model'
+import type { AnnotatedDocument, ApplyTextRequest, FileEntry, OpenedFile, RecoverySnapshot, SaveRequest, SavedFile } from '../shared/model'
 
 const currentDir = path.dirname(fileURLToPath(import.meta.url))
 const isDev = !app.isPackaged && Boolean(process.env.ELECTRON_RENDERER_URL)
@@ -143,12 +143,19 @@ async function readDocument(filePath: string): Promise<OpenedFile> {
     const source = annotationDocument.document?.source
     const basePath = source ? path.resolve(path.dirname(filePath), source) : filePath.replace(/\.annot\.(?:json|md)$/i, '.txt')
     if (!isMarkdown && typeof annotationDocument.text !== 'string') throw new Error('В файле аннотаций отсутствует текст.')
+    const sourceExists = Boolean(source && await exists(basePath))
+    const sourceBytes = sourceExists ? await fs.readFile(basePath) : null
+    const sourceDecoded = sourceBytes ? decodeBuffer(sourceBytes) : null
+    const sourceEol = sourceDecoded
+      ? sourceDecoded.text.includes('\r\n') ? '\r\n' : sourceDecoded.text.includes('\r') ? '\r' : '\n'
+      : annotationDocument.document?.eol === 'crlf' ? '\r\n' : annotationDocument.document?.eol === 'cr' ? '\r' : '\n'
     return {
       path: source ? basePath : filePath,
       text: annotationDocument.text,
-      encoding: 'utf-8',
-      eol: annotationDocument.document?.eol === 'crlf' ? '\r\n' : annotationDocument.document?.eol === 'cr' ? '\r' : '\n',
-      hasBom: false,
+      encoding: sourceDecoded?.encoding ?? 'utf-8',
+      eol: sourceEol,
+      hasBom: sourceDecoded?.hasBom ?? false,
+      originalText: sourceDecoded ? sourceDecoded.text.replace(/\r\n?|\n/g, '\n') : null,
       annotationDocument,
       annotationPath: filePath,
     }
@@ -168,9 +175,17 @@ async function readDocument(filePath: string): Promise<OpenedFile> {
       : JSON.parse(await fs.readFile(annotationPath, 'utf8'))
     : undefined
   if (annotationDocument && typeof annotationDocument === 'object' && 'text' in annotationDocument && typeof annotationDocument.text === 'string') {
-    return { path: filePath, ...decoded, eol, text: annotationDocument.text, annotationDocument, annotationPath }
+    return {
+      path: filePath,
+      ...decoded,
+      eol,
+      text: annotationDocument.text,
+      originalText: text,
+      annotationDocument,
+      annotationPath,
+    }
   }
-  return { path: filePath, ...decoded, eol, text, annotationPath }
+  return { path: filePath, ...decoded, eol, text, originalText: text, annotationPath }
 }
 
 async function exists(filePath: string): Promise<boolean> {
@@ -291,6 +306,34 @@ async function writeSettings(raw: Record<string, unknown>): Promise<{ settings: 
   return { settings: parsed, error: null }
 }
 
+async function applyTextToSource(request: ApplyTextRequest): Promise<void> {
+  const target = path.resolve(request.path)
+  if (!isAllowedPath(target)) throw new Error('Обновление исходника вне разрешённой рабочей области запрещено.')
+  if (!/\.(txt|md)$/i.test(target) || /\.annot\.(json|md)$/i.test(target)) {
+    throw new Error('Применить текст можно только к исходному файлу .txt или .md.')
+  }
+  const encoding = request.encoding === 'utf-16be' ? 'utf16-be' : request.encoding
+  if (!iconv.encodingExists(encoding)) throw new Error(`Неизвестная кодировка: ${request.encoding}`)
+  const normalized = request.text.replace(/\n/g, request.eol)
+  let contents = iconv.encode(normalized, encoding)
+  if (iconv.decode(contents, encoding) !== normalized) {
+    throw new Error('Текст нельзя записать в исходной кодировке. Сохраните исходник в UTF-8.')
+  }
+  if (request.hasBom) {
+    const bom = encoding === 'utf-8'
+      ? Buffer.from([0xef, 0xbb, 0xbf])
+      : encoding === 'utf-16le'
+        ? Buffer.from([0xff, 0xfe])
+        : encoding === 'utf16-be'
+          ? Buffer.from([0xfe, 0xff])
+          : Buffer.alloc(0)
+    contents = Buffer.concat([bom, contents])
+  }
+  await fs.copyFile(target, `${target}.bak`)
+  await atomicWrite(target, contents)
+  fileDigests.set(target, digest(contents))
+}
+
 async function saveDocument(request: SaveRequest): Promise<SavedFile | null> {
   let target = request.path ? path.resolve(request.path) : null
   if (target && !isAllowedPath(target)) throw new Error('Сохранение вне разрешённой рабочей области запрещено.')
@@ -300,6 +343,7 @@ async function saveDocument(request: SaveRequest): Promise<SavedFile | null> {
     if (!isAllowedPath(annotationTarget) || !validSidecars.includes(annotationTarget)) {
       throw new Error('Файл аннотаций должен находиться рядом с исходным документом.')
     }
+
   }
   const isNewSource = !target
   if (!target) {
@@ -384,6 +428,7 @@ function registerIpc(): void {
     if (!isAllowedPath(target)) throw new Error('Путь вне разрешённой рабочей области.')
     fileDigests.set(target, await currentDigest(target))
   })
+  installHandler('fs:applyText', (request) => applyTextToSource(request as ApplyTextRequest))
   installHandler('fs:save', (payload) => saveDocument(payload as SaveRequest))
   installHandler('settings:get', () => readSettings())
   installHandler('settings:save', (settings) => writeSettings(settings))
