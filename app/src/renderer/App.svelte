@@ -12,10 +12,30 @@
   import type { AppState } from '../shared/app-state'
   import { getVirtualRange } from '../shared/virtual-list'
   import { annotationField, annotationHistory, focusDecorations, focusViewField, setAnnotationRanges, setFocusView } from './editor/annotation-field'
-  import { createLineStarts, createOutlineRows } from './editor/outline'
+  import { createLineStarts, createOutlineRows, lineNumberAt } from './editor/outline'
   import { parseTags } from './editor/annotation-tags'
   import { createAnnotatedDocument, parseAnnotatedDocument, restoreAnnotations, toPlainAnnotatedDocument } from './format/json-format'
-  import { getAnnotationMarkerColor, parseShortcut, resolveTheme, settingsSchema, themes, type AppSettings, type UserTheme } from '../shared/settings'
+  import { getAnnotationMarkerColor, parseShortcut, resolveTheme, settingsSchema, themes, type AppSettings, type ThemePalette, type UserTheme } from '../shared/settings'
+  import Icon from './Icon.svelte'
+
+  type SettingsSection = 'appearance' | 'typography' | 'editor' | 'annotations' | 'colors' | 'files' | 'shortcuts'
+  type ConfirmChoice = 'confirm' | 'cancel' | 'tertiary'
+  interface ConfirmRequest {
+    title: string
+    message: string
+    confirmLabel: string
+    cancelLabel?: string
+    tertiaryLabel?: string
+    danger?: boolean
+    resolve: (choice: ConfirmChoice) => void
+  }
+  interface ThemeOption {
+    id: string
+    name: string
+    kind: 'dark' | 'light'
+    colors: Record<string, string>
+    user: boolean
+  }
 
   interface DocumentTab {
     id: string
@@ -86,7 +106,7 @@
   let tabs = $state<DocumentTab[]>([])
   let activeTabId = $state('')
   let closeTabId = $state<string | null>(null)
-  let savingTabId: string | null = null
+  let savingTabId = $state<string | null>(null)
   let externalPromptPath: string | null = null
   let filePath = $state<string | null>(null)
   let annotationPath = $state<string | null>(null)
@@ -121,12 +141,17 @@
   let systemUsesDarkColors = $state(true)
   let commandPaletteOpen = $state(false)
   let commandPaletteQuery = $state('')
+  let commandPaletteIndex = $state(0)
   let commandPaletteInput = $state<HTMLInputElement>()
+  let commandPaletteResults = $state<HTMLDivElement>()
   let themePickerOpen = $state(false)
+  let settingsSection = $state<SettingsSection>('appearance')
+  let confirmRequest = $state<ConfirmRequest | null>(null)
   let pendingShortcut = ''
   let pendingShortcutTimer: ReturnType<typeof setTimeout> | undefined
   let settingsSaveTimer: ReturnType<typeof setTimeout> | undefined
   let dirty = $state(false)
+  let welcomeDismissed = $state(false)
   let status = $state('Готово')
   let cursorPosition = $state({ line: 1, column: 1 })
   let noteDraft = $state('')
@@ -307,10 +332,142 @@
     { id: 'explorer.delete', label: 'Переместить в корзину', shortcut: 'Delete' },
     { id: 'edit.undo', label: 'Отменить файловую операцию', shortcut: 'Ctrl+Z' },
   ] as const
+  const shortcutGroups = [
+    { title: 'Аннотации', ids: ['annotation.create', 'annotation.confirm', 'annotation.next', 'annotation.prev', 'editor.find'] },
+    { title: 'Файлы и вкладки', ids: ['file.new', 'file.save', 'file.saveAs', 'tab.close', 'tab.next', 'tab.prev', 'workspace.openFolder'] },
+    { title: 'Вид и панели', ids: ['view.focusMode', 'layout.explorer', 'layout.annotations', 'focus.explorer', 'focus.editor', 'focus.annotations', 'zoom.in', 'zoom.out', 'zoom.reset', 'theme.pick'] },
+    { title: 'Навигация и команды', ids: ['palette.open', 'settings.open', 'ui.cancel'] },
+    { title: 'Проводник', ids: ['explorer.rename', 'explorer.delete', 'edit.undo'] },
+  ]
+  const colorLabels: Record<string, string> = {
+    'ui.bg': 'Фон панелей',
+    'ui.fg': 'Текст интерфейса',
+    'ui.fgMuted': 'Приглушённый текст',
+    'ui.accent': 'Акцент',
+    'ui.border': 'Границы и разделители',
+    'editor.bg': 'Фон редактора',
+    'editor.fg': 'Текст редактора',
+    'editor.selection': 'Выделение',
+    'annot.default': 'Аннотация по умолчанию',
+    'annot.comment': 'Комментарий',
+    'annot.note': 'Заметка',
+    'annot.question': 'Вопрос',
+    'annot.idea': 'Идея',
+    'annot.todo': 'Задача',
+    'annot.important': 'Важно',
+  }
   const visibleCommands = $derived(commandDefinitions.filter((command) =>
     `${command.label} ${command.id}`.toLocaleLowerCase('ru').includes(commandPaletteQuery.toLocaleLowerCase('ru'))))
-  const outlineRows = $derived(createOutlineRows(annotations, createLineStarts(text)))
-  const outlineRowHeight = 38
+  const activeCommand = $derived(visibleCommands[commandPaletteIndex])
+  const lineStarts = $derived(createLineStarts(text))
+  const outlineRows = $derived(createOutlineRows(annotations, lineStarts))
+  const outlineRowHeight = 44
+  const fileName = $derived(filePath?.split(/[\\/]/).at(-1) ?? 'Новый документ')
+  const annotationFormat = $derived(
+    annotationPath?.toLocaleLowerCase('ru').endsWith('.md') ? 'Markdown'
+      : annotationPath?.toLocaleLowerCase('ru').endsWith('.json') ? 'JSON'
+        : settings.files.saveFormat === 'md' ? 'Markdown' : 'JSON',
+  )
+  const showWelcome = $derived(!welcomeDismissed && !focusMode && !filePath && !text && !dirty && !annotations.length)
+  const annotationDateFormat = new Intl.DateTimeFormat('ru', { day: 'numeric', month: 'short' })
+  const annotationDateFullFormat = new Intl.DateTimeFormat('ru', { dateStyle: 'medium', timeStyle: 'short' })
+  const themeLabels: Record<string, string> = {
+    dracula: 'Dracula',
+    'github-light': 'GitHub Light',
+    'github-dark': 'GitHub Dark',
+    nord: 'Nord',
+    'solarized-dark': 'Solarized Dark',
+    'solarized-light': 'Solarized Light',
+    monokai: 'Monokai',
+    cobalt2: 'Cobalt 2',
+    'one-dark': 'One Dark',
+    'gruvbox-dark': 'Gruvbox Dark',
+    'tokyo-night': 'Tokyo Night',
+    'paper-light': 'Paper Light',
+  }
+  const themeSwatchKeys = ['editor.bg', 'ui.bg', 'ui.accent', 'annot.comment', 'annot.important']
+
+  function safeResolveTheme(themeId: string): ThemePalette {
+    try {
+      return resolveTheme(themeId, {}, availableUserThemes)
+    } catch {
+      return resolveTheme('dracula')
+    }
+  }
+
+  const themeOptions = $derived.by((): ThemeOption[] => {
+    const options: ThemeOption[] = Object.keys(themes).map((id) => {
+      const palette = safeResolveTheme(id)
+      return { id, name: themeLabels[id] ?? id, kind: palette.kind, colors: palette.colors, user: false }
+    })
+    for (const theme of availableUserThemes) {
+      const palette = safeResolveTheme(theme.id)
+      const option: ThemeOption = { id: theme.id, name: theme.name, kind: palette.kind, colors: palette.colors, user: true }
+      const existing = options.findIndex((item) => item.id === theme.id)
+      if (existing >= 0) options[existing] = option
+      else options.push(option)
+    }
+    return options
+  })
+  const lightThemeOptions = $derived(themeOptions.filter((option) => option.kind === 'light'))
+  const darkThemeOptions = $derived(themeOptions.filter((option) => option.kind === 'dark'))
+  const settingsSections = [
+    { id: 'appearance', label: 'Оформление', icon: 'palette', title: 'Оформление', description: 'Тема, цвета интерфейса и внешний вид рабочего пространства.' },
+    { id: 'typography', label: 'Шрифты', icon: 'type', title: 'Шрифты и масштаб', description: 'Типографика текста, заметок и элементов интерфейса.' },
+    { id: 'editor', label: 'Редактор', icon: 'layout', title: 'Редактор', description: 'Полотно текста, перенос строк и режим фокуса.' },
+    { id: 'annotations', label: 'Аннотации', icon: 'message-plus', title: 'Аннотации', description: 'Поведение панели заметок и подсветка фрагментов.' },
+    { id: 'colors', label: 'Цвета', icon: 'droplet', title: 'Переопределение цветов', description: 'Точная настройка палитры поверх выбранной темы.' },
+    { id: 'files', label: 'Файлы', icon: 'folder', title: 'Файлы и автосохранение', description: 'Форматы, кодировки, резервные копии и сглаживание.' },
+    { id: 'shortcuts', label: 'Клавиши', icon: 'keyboard', title: 'Сочетания клавиш', description: 'Команды приложения и переназначение горячих клавиш.' },
+  ] as const
+  const activeSettingsSection = $derived(settingsSections.find((section) => section.id === settingsSection) ?? settingsSections[0]!)
+
+  function annotationCountLabel(count: number): string {
+    const form = annotationPluralRules.select(count)
+    return `${count} ${form === 'one' ? 'аннотация' : form === 'few' ? 'аннотации' : 'аннотаций'}`
+  }
+
+  function formatAnnotationDate(value: string): string {
+    const date = new Date(value)
+    return Number.isNaN(date.getTime()) ? '' : annotationDateFormat.format(date)
+  }
+
+  function formatAnnotationDateFull(value: string): string {
+    const date = new Date(value)
+    return Number.isNaN(date.getTime()) ? '' : annotationDateFullFormat.format(date)
+  }
+
+  function askConfirm(options: Omit<ConfirmRequest, 'resolve'>): Promise<ConfirmChoice> {
+    return new Promise((resolve) => {
+      confirmRequest = { ...options, resolve }
+    })
+  }
+
+  function answerConfirm(choice: ConfirmChoice): void {
+    const request = confirmRequest
+    confirmRequest = null
+    request?.resolve(choice)
+  }
+
+  function selectTheme(themeId: string): void {
+    settings.theme = themeId
+    applyTheme()
+    if (themePickerOpen) {
+      themePickerOpen = false
+      void saveSettings(false)
+    }
+  }
+
+  function openSettings(section: SettingsSection = 'appearance'): void {
+    settingsSection = section
+    void loadSettings()
+    showSettings = true
+  }
+
+  function closeSettings(): void {
+    showSettings = false
+    void loadSettings()
+  }
   const outlineStart = $derived(Math.max(0, Math.floor(outlineScrollTop / outlineRowHeight) - 4))
   const outlineEnd = $derived(Math.min(outlineRows.length, Math.ceil((outlineScrollTop + outlineHeight) / outlineRowHeight) + 4))
   const visibleOutlineRows = $derived(outlineRows.slice(outlineStart, outlineEnd))
@@ -523,24 +680,42 @@
   async function openCommandPalette(): Promise<void> {
     commandPaletteOpen = true
     commandPaletteQuery = ''
+    commandPaletteIndex = 0
     await tick()
     commandPaletteInput?.focus()
   }
 
+  function setCommandPaletteQuery(value: string): void {
+    commandPaletteQuery = value
+    commandPaletteIndex = 0
+  }
+
+  async function moveCommandPaletteSelection(delta: number): Promise<void> {
+    if (!visibleCommands.length) return
+    commandPaletteIndex = Math.max(0, Math.min(visibleCommands.length - 1, commandPaletteIndex + delta))
+    await tick()
+    commandPaletteResults?.querySelector<HTMLElement>(`[data-command-index="${commandPaletteIndex}"]`)?.scrollIntoView({ block: 'nearest' })
+  }
+
   async function executeCommand(id: string): Promise<void> {
+    const paletteWasOpen = commandPaletteOpen
     commandPaletteOpen = false
     switch (id) {
       case 'annotation.create': await createAnnotation(); break
       case 'annotation.confirm': confirmAnnotation(); break
       case 'ui.cancel':
-        if (showSettings) { showSettings = false; void loadSettings() }
+        if (paletteWasOpen) break
+        if (confirmRequest) answerConfirm('cancel')
         else if (closeTabId) closeTabId = null
         else if (treeEdit) treeEdit = null
         else if (treeMenu) treeMenu = false
         else if (themePickerOpen) themePickerOpen = false
+        else if (showSettings) closeSettings()
+        else if (focusMode) setFocusMode(false)
         else if (pendingSelection.from !== pendingSelection.to) {
           pendingSelection = { from: 0, to: 0 }
           noteDraft = ''
+          status = 'Готово'
         }
         break
       case 'annotation.next': moveAnnotation(1); break
@@ -560,10 +735,7 @@
         break
       }
       case 'theme.pick': themePickerOpen = true; break
-      case 'settings.open':
-        await loadSettings()
-        showSettings = true
-        break
+      case 'settings.open': openSettings(); break
       case 'palette.open': await openCommandPalette(); break
       case 'editor.find': document.querySelector<HTMLInputElement>('.search-input')?.focus(); break
       case 'zoom.in': adjustEditorFontSize(1); break
@@ -684,9 +856,21 @@
     return conflicts
   }
 
+  function hasOpenModal(): boolean {
+    return commandPaletteOpen || showSettings || themePickerOpen || Boolean(closeTabId) || Boolean(treeMenu) || Boolean(treeEdit) || Boolean(confirmRequest)
+  }
+
   function handleCommandShortcut(event: KeyboardEvent, typing: boolean, inTree: boolean): boolean {
     if (event.target instanceof HTMLElement && event.target.closest('.shortcut-setting')) return false
     const stroke = eventStroke(event)
+    if (hasOpenModal()) {
+      if (stroke !== 'Escape') return false
+      if (pendingShortcut) {
+        if (pendingShortcutTimer) clearTimeout(pendingShortcutTimer)
+        pendingShortcut = ''
+        return true
+      }
+    }
     const conflicts = conflictingCommandIds()
     if (pendingShortcut) {
       const matched = commandDefinitions.find((command) => {
@@ -735,7 +919,7 @@
       }
       if ((command.id.startsWith('explorer.') || command.id === 'edit.undo') && !inTree) continue
       if (command.id === 'annotation.confirm' && !(event.target instanceof HTMLTextAreaElement)) continue
-      if (command.id === 'ui.cancel' && !commandPaletteOpen && !themePickerOpen && !showSettings && !closeTabId && !treeMenu && !treeEdit && pendingSelection.from === pendingSelection.to) continue
+      if (command.id === 'ui.cancel' && !commandPaletteOpen && !themePickerOpen && !showSettings && !closeTabId && !treeMenu && !treeEdit && !confirmRequest && !focusMode && pendingSelection.from === pendingSelection.to) continue
       event.preventDefault()
       void executeCommand(command.id).catch((error: unknown) => {
         status = `Команда не выполнена: ${error instanceof Error ? error.message : String(error)}`
@@ -918,8 +1102,14 @@
     if (externalPromptPath || !filePath) return
     externalPromptPath = changedPath
     const sourceName = changedPath.split(/[\\/]/).at(-1) ?? changedPath
-    const reload = window.confirm(`Файл «${sourceName}» изменён в другой программе.\n\nОК — перезагрузить документ и заменить несохранённые изменения.\nОтмена — оставить текущую версию открытой.`)
-    if (!reload) {
+    const reload = await askConfirm({
+      title: 'Файл изменён вне приложения',
+      message: `Файл «${sourceName}» изменён другой программой. Перезагрузить документ? Несохранённые изменения будут потеряны.`,
+      confirmLabel: 'Перезагрузить',
+      cancelLabel: 'Оставить текущую',
+      danger: true,
+    })
+    if (reload !== 'confirm') {
       try {
         await invoke('fs:watchAck', { path: changedPath })
         tabs = tabs.map((tab) => tab.id === activeTabId
@@ -1057,7 +1247,15 @@
 
   async function reopenWithEncoding(): Promise<void> {
     if (!filePath) return
-    if (dirty && !window.confirm('Переоткрытие может отбросить несохранённые изменения. Продолжить?')) return
+    if (dirty) {
+      const proceed = await askConfirm({
+        title: 'Переоткрыть документ?',
+        message: 'Файл будет прочитан заново с выбранной кодировкой. Несохранённые изменения будут отброшены.',
+        confirmLabel: 'Переоткрыть',
+        danger: true,
+      })
+      if (proceed !== 'confirm') return
+    }
     try {
       const selected = await invoke<string | null>('dialog:chooseEncoding', { current: encoding })
       if (selected) await openFile(filePath, selected)
@@ -1394,11 +1592,22 @@
       return
     }
     treeMenu = false
-    if (!window.confirm(`Переместить выбранные элементы (${selected.length}) в корзину?`)) return
+    const proceed = await askConfirm({
+      title: selected.length === 1 ? 'Переместить в корзину?' : 'Переместить элементы в корзину?',
+      message: `${selected.length === 1 ? `Элемент «${selected[0]!.name}»` : `Выбранные элементы (${selected.length})`} можно будет восстановить из корзины Windows.`,
+      confirmLabel: 'Переместить в корзину',
+      danger: true,
+    })
+    if (proceed !== 'confirm') return
     try {
       for (const entry of selected) {
         const includeSidecars = entry.kind === 'file' && entry.annotated
-          ? window.confirm(`Также переместить связанные файлы аннотаций для «${entry.name}» в корзину?`)
+          ? (await askConfirm({
+              title: 'Связанные аннотации',
+              message: `Переместить в корзину файлы аннотаций для «${entry.name}» вместе с исходником?`,
+              confirmLabel: 'Переместить вместе',
+              cancelLabel: 'Оставить аннотации',
+            })) === 'confirm'
           : false
         await invoke('fs:delete', { path: entry.path, includeSidecars })
       }
@@ -1437,7 +1646,9 @@
       status = 'Дождитесь завершения сохранения текущей вкладки.'
       return
     }
+    welcomeDismissed = true
     captureActiveTab()
+    const reuseBlankTab = tabs.some((tab) => tab.id === activeTabId && !tab.path && !tab.dirty && !tab.text && !tab.annotations.length)
     focusMode = false
     editor?.dispatch({
       effects: [
@@ -1465,8 +1676,8 @@
       editor.focus()
     }
     status = 'Новый документ'
-    const tab = createCurrentTab()
-    tabs = [...tabs, tab]
+    const tab = createCurrentTab(reuseBlankTab ? activeTabId : undefined)
+    tabs = reuseBlankTab ? tabs.map((item) => item.id === tab.id ? tab : item) : [...tabs, tab]
     activeTabId = tab.id
   }
 
@@ -1572,7 +1783,12 @@
 
   async function applyTextToSource(): Promise<void> {
     if (!filePath || !annotationPath || filePath === annotationPath) return
-    if (!window.confirm('Заменить исходный файл текущим текстом? Перед записью будет создана резервная копия .bak.')) return
+    const proceed = await askConfirm({
+      title: 'Применить текст к исходнику?',
+      message: 'Исходный файл будет заменён текущим текстом аннотированного документа. Перед записью рядом будет создана резервная копия .bak.',
+      confirmLabel: 'Применить',
+    })
+    if (proceed !== 'confirm') return
     try {
       await invoke('fs:applyText', {
         path: filePath,
@@ -1782,7 +1998,7 @@
       return
     }
     if (handleCommandShortcut(event, typing, inTree)) return
-    if (mod && code === 'KeyO') {
+    if (!hasOpenModal() && mod && code === 'KeyO') {
       event.preventDefault()
       void openFile()
     } else if (event.key === 'Escape' && pendingSelection.from !== pendingSelection.to) {
@@ -1811,10 +2027,18 @@
       if (!snapshots.length) return
       const snapshot = snapshots.sort((left, right) => right.modified.localeCompare(left.modified))[0]
       if (!snapshot) return
-      if (!window.confirm(`Найдены несохранённые изменения${snapshot.path ? ` в файле «${snapshot.path.split(/[\\/]/).at(-1)}»` : ''}. Восстановить?`)) {
+      const choice = await askConfirm({
+        title: 'Восстановить изменения?',
+        message: `Найдены несохранённые изменения${snapshot.path ? ` в файле «${snapshot.path.split(/[\\/]/).at(-1)}»` : ''}. Восстановить их или отбросить?`,
+        confirmLabel: 'Восстановить',
+        cancelLabel: 'Отбросить',
+        tertiaryLabel: 'Позже',
+      })
+      if (choice === 'cancel') {
         await invoke('recovery:delete', { path: snapshot.path })
         return
       }
+      if (choice !== 'confirm') return
       revision += 1
       filePath = snapshot.path
       text = snapshot.text
@@ -1916,12 +2140,15 @@
       }),
       EditorView.theme({
         '&': { height: '100%', color: 'var(--editor-fg)', backgroundColor: 'var(--editor-bg)', fontSize: '16px' },
-        '.cm-content': { fontFamily: 'var(--editor-font-family)', fontSize: 'var(--editor-font-size)', fontWeight: 'var(--editor-font-weight)', fontVariantLigatures: 'var(--editor-ligatures)', lineHeight: 'var(--editor-line-height)', maxWidth: 'var(--editor-max-width)', margin: '0 auto', padding: '24px', caretColor: 'var(--editor-fg)' },
+        '.cm-content': { fontFamily: 'var(--editor-font-family)', fontSize: 'var(--editor-font-size)', fontWeight: 'var(--editor-font-weight)', fontVariantLigatures: 'var(--editor-ligatures)', lineHeight: 'var(--editor-line-height)', maxWidth: 'var(--editor-max-width)', margin: '0 auto', padding: '40px 32px 120px', caretColor: 'var(--editor-fg)' },
         '.cm-gutters': { backgroundColor: 'var(--editor-bg)', color: 'var(--gutter-fg)', border: 'none' },
         '.cm-activeLine': { backgroundColor: 'color-mix(in srgb, var(--editor-fg) 4%, transparent)' },
         '.cm-activeLineGutter': { backgroundColor: 'transparent' },
         '.cm-selectionBackground': { backgroundColor: 'var(--selection) !important' },
-        '.cm-focus-gap': { display: 'inline-block', whiteSpace: 'pre-wrap', minWidth: '1px', height: '2.5em', verticalAlign: 'baseline' },
+        '.cm-focus-gap': { display: 'inline-block', userSelect: 'none' },
+        '.cm-focus-gap-blank1': { display: 'block', height: 'calc(var(--editor-line-height, 1.6) * 1em)' },
+        '.cm-focus-gap-blank2': { display: 'block', height: 'calc(var(--editor-line-height, 1.6) * 2em)' },
+        '.cm-focus-gap-ellipsis': { minWidth: '2em', height: 'auto', color: 'var(--fg-muted)', textAlign: 'center' },
       }),
     ]
     editor = new EditorView({
@@ -2057,6 +2284,17 @@
   })
 
   $effect(() => {
+    const id = editNoteId
+    if (!id) return
+    void tick().then(() => {
+      const input = annotationScrollHost?.querySelector<HTMLTextAreaElement>(`[data-annotation-id="${CSS.escape(id)}"] .annotation-body`)
+      if (!input) return
+      input.focus()
+      input.setSelectionRange(input.value.length, input.value.length)
+    })
+  })
+
+  $effect(() => {
     if (!appStateLoaded) return
     const openDocumentTabs = tabs.filter((tab) => tab.path)
     const activeTab = Math.max(0, openDocumentTabs.findIndex((tab) => tab.id === activeTabId))
@@ -2082,48 +2320,150 @@
 </svelte:head>
 
 <div class:focus-mode={focusMode} class="app-shell">
-  <header class="toolbar">
-    <div class="brand"><span class="brand-mark">A</span><span>Annotator</span></div>
-    <div class="toolbar-group">
-      <button onclick={newFile} title="Новый документ (Ctrl+N)">Новый</button>
-      <button onclick={() => void openFile()} title="Открыть файл (Ctrl+O)">Открыть</button>
-      <button onclick={() => void openFolder()} title="Открыть рабочую папку">Папка</button>
-      <button onclick={() => void openWorkspace()} title="Открыть файл workspace">Workspace…</button>
-      <button onclick={() => void openCommandPalette()} title="Панель команд (Ctrl+Shift+P)">Команды</button>
+  <header class="app-bar">
+    <div class="brand" aria-label="Annotator">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 20 20" fill="none">
+          <path d="M4.5 5.5h7M4.5 10h11M4.5 14.5h6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+          <circle cx="15.5" cy="5.5" r="1.5" fill="currentColor" />
+        </svg>
+      </span>
+      <span class="brand-name">Annotator</span>
     </div>
-    <div class="toolbar-group editor-actions">
-      <button class="accent-button" onclick={createAnnotation} title="Создать аннотацию (Ctrl+Shift+A)">＋ Аннотация</button>
-      <button onclick={() => void save()} title="Сохранить (Ctrl+S)">Сохранить</button>
-      <button onclick={() => void save(true)} title="Сохранить как (Ctrl+Shift+S)">Сохранить как…</button>
+
+    <div class="bar-group" role="group" aria-label="Документ">
+      <button class="bar-button" onclick={() => void newFile()} title="Новый документ (Ctrl+N)" aria-label="Новый документ">
+        <Icon name="file-plus" size={17} /><span class="bar-label">Новый</span>
+      </button>
+      <button class="bar-button" onclick={() => void openFile()} title="Открыть файл (Ctrl+O)" aria-label="Открыть файл">
+        <Icon name="file-text" size={17} /><span class="bar-label">Открыть</span>
+      </button>
+      <button class="bar-button" onclick={() => void openFolder()} title="Открыть рабочую папку" aria-label="Открыть рабочую папку">
+        <Icon name="folder-open" size={17} /><span class="bar-label">Папка</span>
+      </button>
+      <button class="bar-button" onclick={() => void openWorkspace()} title="Открыть workspace" aria-label="Открыть workspace">
+        <Icon name="layers" size={17} /><span class="bar-label">Workspace</span>
+      </button>
     </div>
-    <div class="toolbar-spacer"></div>
-    <button class:active={focusMode} onclick={() => setFocusMode(!focusMode)} title="Режим фокуса (F9)">Фокус</button>
-    <button aria-label="Настройки приложения" onclick={() => { void loadSettings(); showSettings = true }} title="Настройки приложения">⚙</button>
+
+    <span class="bar-divider" aria-hidden="true"></span>
+
+    <button class="bar-button" onclick={() => void openCommandPalette()} title="Панель команд (Ctrl+Shift+P)" aria-label="Панель команд">
+      <Icon name="command" size={17} /><span class="bar-label">Команды</span>
+    </button>
+
+    <span class="bar-spacer"></span>
+
+    <button class="primary-action" onclick={() => void createAnnotation()} title="Создать аннотацию из выделения (Ctrl+Shift+A)" aria-label="Создать аннотацию из выделения">
+      <Icon name="message-plus" size={17} /><span class="action-label">Аннотация</span>
+    </button>
+
+    <div class="bar-group bar-end" role="group" aria-label="Сохранение и вид">
+      <button class="icon-button" onclick={() => void save()} title="Сохранить (Ctrl+S)" aria-label="Сохранить">
+        <Icon name="save" size={17} />
+      </button>
+      <button class="icon-button" onclick={() => void save(true)} title="Сохранить как… (Ctrl+Shift+S)" aria-label="Сохранить как">
+        <Icon name="save-as" size={17} />
+      </button>
+      <button class="icon-button" class:active={focusMode} aria-pressed={focusMode} onclick={() => setFocusMode(!focusMode)} title="Режим фокуса (F9)" aria-label="Режим фокуса">
+        <Icon name="focus" size={17} />
+      </button>
+      <button class="icon-button" onclick={() => openSettings()} title="Настройки (Ctrl+,)" aria-label="Настройки">
+        <Icon name="settings" size={17} />
+      </button>
+    </div>
   </header>
+
+  {#if focusMode}
+    <div class="focus-hud">
+      <span class="focus-hud-mark" aria-hidden="true"><Icon name="book-open" size={16} /></span>
+      <span class="focus-hud-copy">
+        <span class="focus-hud-title">Режим фокуса</span>
+        <span class="focus-hud-subtitle">{fileName}<span class="focus-hud-count">{annotationCountLabel(annotations.length)}</span></span>
+      </span>
+      <button class="hud-exit" onclick={() => setFocusMode(false)} title="Выйти из режима фокуса (F9)">
+        <span>Выйти</span><kbd>F9</kbd>
+      </button>
+    </div>
+  {/if}
 
   <div class="workspace">
     {#if showExplorer && !focusMode}
-      <aside class="explorer pane" style:width="{explorerWidth}px" style:flex-basis="{explorerWidth}px" use:measurePaneWidth={'explorer'}>
-        <div class="pane-heading"><span>ПРОВОДНИК</span><div class="explorer-actions"><button class="icon-button" aria-expanded={treeMenu} onclick={toggleTreeMenu} title="Операции с файлами">⋯</button><button class="icon-button" onclick={() => void openFolder(true)} title="Добавить папку">＋</button></div></div>
+      <aside class="explorer pane" style:width="{explorerWidth}px" style:flex-basis="{explorerWidth}px" use:measurePaneWidth={'explorer'} aria-label="Проводник">
+        <div class="pane-header">
+          <div class="pane-title"><Icon name="folder" size={15} /><span>Проводник</span></div>
+          <div class="pane-actions">
+            <button class="icon-button compact" onclick={() => void openFolder(true)} title="Добавить папку" aria-label="Добавить папку">
+              <Icon name="folder-plus" size={15} />
+            </button>
+            <button class="icon-button compact" aria-expanded={treeMenu} onclick={toggleTreeMenu} title="Операции с файлами" aria-label="Операции с файлами">
+              <Icon name="dots" size={16} />
+            </button>
+          </div>
+        </div>
+
         {#if treeMenu && folders.length}
-          <div class="tree-context-menu" role="menu" aria-label="Операции с файлами">
-            <button role="menuitem" onclick={() => { treeMenu = false; void saveWorkspace() }}>Сохранить workspace как…</button>
-            <button role="menuitem" onclick={() => beginTreeEdit('create-file')}>Новый текстовый файл</button>
-            <button role="menuitem" onclick={() => beginTreeEdit('create-folder')}>Новая папка</button>
+          <div class="tree-context-menu menu-surface" role="menu" aria-label="Операции с файлами">
+            <button role="menuitem" onclick={() => { treeMenu = false; void saveWorkspace() }}>
+              <Icon name="save" size={14} /><span>Сохранить workspace</span>
+            </button>
+            <span class="menu-separator" role="separator"></span>
+            <button role="menuitem" onclick={() => beginTreeEdit('create-file')}>
+              <Icon name="file-plus" size={14} /><span>Новый текстовый файл</span>
+            </button>
+            <button role="menuitem" onclick={() => beginTreeEdit('create-folder')}>
+              <Icon name="folder-plus" size={14} /><span>Новая папка</span>
+            </button>
             {#if selectedEntryPath}
-              <button role="menuitem" onclick={() => beginTreeEdit('rename')}>Переименовать… <span>F2</span></button>
-              <button role="menuitem" onclick={() => void deleteTreeEntry()}>Переместить в корзину <span>Delete</span></button>
-              <button role="menuitem" onclick={() => { treeMenu = false; void invoke('shell:copyPath', { path: selectedEntryPath }).then(() => status = 'Путь скопирован').catch((error: unknown) => status = `Не удалось скопировать путь: ${error instanceof Error ? error.message : String(error)}`) }}>Копировать путь</button>
-              <button role="menuitem" onclick={() => { treeMenu = false; void invoke('shell:showItemInFolder', { path: selectedEntryPath }).catch((error: unknown) => status = `Не удалось открыть расположение: ${error instanceof Error ? error.message : String(error)}`) }}>Показать в Проводнике</button>
+              <span class="menu-separator" role="separator"></span>
+              <button role="menuitem" onclick={() => beginTreeEdit('rename')}>
+                <Icon name="pencil" size={14} /><span>Переименовать</span><kbd>F2</kbd>
+              </button>
+              <button role="menuitem" onclick={() => void deleteTreeEntry()}>
+                <Icon name="trash" size={14} /><span>Переместить в корзину</span><kbd>Del</kbd>
+              </button>
+              <button role="menuitem" onclick={() => { treeMenu = false; void invoke('shell:copyPath', { path: selectedEntryPath }).then(() => status = 'Путь скопирован').catch((error: unknown) => status = `Не удалось скопировать путь: ${error instanceof Error ? error.message : String(error)}`) }}>
+                <Icon name="layers" size={14} /><span>Копировать путь</span>
+              </button>
+              <button role="menuitem" onclick={() => { treeMenu = false; void invoke('shell:showItemInFolder', { path: selectedEntryPath }).catch((error: unknown) => status = `Не удалось открыть расположение: ${error instanceof Error ? error.message : String(error)}`) }}>
+                <Icon name="folder-open" size={14} /><span>Показать в Проводнике</span>
+              </button>
             {/if}
           </div>
         {/if}
+
         {#if folders.length}
-          <div class:tree-root-drop={dropDestination === folders[0] && dropTargetPath === null} class="file-tree" role="tree" aria-label="Файлы рабочей папки" tabindex="0" oncontextmenu={(event) => { if (event.target === event.currentTarget) openTreeMenu(event) }} ondragover={(event) => { if (draggedEntryPaths.length) { event.preventDefault(); dropDestination = folders[0]; dropTargetPath = null } }} ondragleave={(event) => { if (event.target === event.currentTarget) clearDropTarget() }} ondrop={(event) => void dropOnTree(event, folders[0])}>
+          <div
+            class:tree-root-drop={dropDestination === folders[0] && dropTargetPath === null}
+            class="file-tree"
+            role="tree"
+            aria-label="Файлы рабочей папки"
+            tabindex="0"
+            oncontextmenu={(event) => { if (event.target === event.currentTarget) openTreeMenu(event) }}
+            ondragover={(event) => { if (draggedEntryPaths.length) { event.preventDefault(); dropDestination = folders[0]; dropTargetPath = null } }}
+            ondragleave={(event) => { if (event.target === event.currentTarget) clearDropTarget() }}
+            ondrop={(event) => void dropOnTree(event, folders[0])}
+          >
             {#each folders as root (root)}
-              <div class:drop-root={dropTargetPath === root} class="root-label" title={root} role="treeitem" aria-selected="false" tabindex="0" ondragover={(event) => dragOverRoot(event, root)} ondragleave={(event) => { if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) clearDropTarget() }} ondrop={(event) => void dropOnTree(event, root)}>{rootErrors[root] ? '⚠' : '▾'} {folderNames[root] ?? root.split(/[\\/]/).at(-1)}</div>
+              <div
+                class:drop-root={dropTargetPath === root}
+                class="root-label"
+                title={root}
+                role="treeitem"
+                aria-selected="false"
+                tabindex="0"
+                ondragover={(event) => dragOverRoot(event, root)}
+                ondragleave={(event) => { if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) clearDropTarget() }}
+                ondrop={(event) => void dropOnTree(event, root)}
+              >
+                <Icon name={rootErrors[root] ? 'alert' : 'folder-open'} size={15} />
+                <span class="root-name">{folderNames[root] ?? root.split(/[\\/]/).at(-1)}</span>
+              </div>
               {#if rootErrors[root]}
-                <div class="root-error"><span>{rootErrors[root]}</span><button onclick={() => void retryRoot(root)}>Повторить</button></div>
+                <div class="root-error" role="alert">
+                  <span>{rootErrors[root]}</span>
+                  <button class="mini-button" onclick={() => void retryRoot(root)}>Повторить</button>
+                </div>
               {:else}
                 {#each rootEntries[root] ?? [] as entry (entry.path)}
                   {@render TreeEntry(entry, 0, expanded, children, toggleDirectory, openFile)}
@@ -2131,187 +2471,36 @@
               {/if}
             {/each}
           </div>
+          <div class="explorer-footer">
+            <button class="mini-button" onclick={() => void openFile()} title="Открыть отдельный файл">
+              <Icon name="file-plus" size={14} /><span>Открыть файл</span>
+            </button>
+            <button class="mini-button" onclick={() => void saveWorkspace()} title="Сохранить workspace">
+              <Icon name="save" size={14} /><span>Сохранить</span>
+            </button>
+          </div>
         {:else}
-          <div class="file-tree empty-tree"><div class="empty-hint"><span class="empty-icon">⌂</span><p>Откройте папку с документами,<br />чтобы видеть файлы здесь.</p><button onclick={() => void openFolder()}>Открыть папку</button></div></div>
-        {/if}
-
-        {#if showSettings}
-          <div class="modal-backdrop">
-            <dialog open class="settings-dialog" aria-modal="true" aria-labelledby="settings-title" use:modalDialog>
-              <div class="settings-title-row">
-                <h2 id="settings-title">Настройки Annotator</h2>
-                <button aria-label="Закрыть настройки" onclick={() => { showSettings = false; void loadSettings() }}>×</button>
-              </div>
-              <div class="settings-scroll">
-                <nav class="settings-nav" aria-label="Разделы настроек">
-                  <button onclick={() => document.getElementById('settings-appearance')?.scrollIntoView({ block: 'start', behavior: 'smooth' })}>Внешний вид</button>
-                  <button onclick={() => document.getElementById('settings-typography')?.scrollIntoView({ block: 'start', behavior: 'smooth' })}>Шрифты</button>
-                  <button onclick={() => document.getElementById('settings-editor')?.scrollIntoView({ block: 'start', behavior: 'smooth' })}>Отображение</button>
-                  <button onclick={() => document.getElementById('settings-annotations')?.scrollIntoView({ block: 'start', behavior: 'smooth' })}>Аннотации</button>
-                  <button onclick={() => document.getElementById('settings-colors')?.scrollIntoView({ block: 'start', behavior: 'smooth' })}>Цвета</button>
-                  <button onclick={() => document.getElementById('settings-files')?.scrollIntoView({ block: 'start', behavior: 'smooth' })}>Файлы</button>
-                  <button onclick={() => document.getElementById('settings-shortcuts')?.scrollIntoView({ block: 'start', behavior: 'smooth' })}>Сочетания клавиш</button>
-                </nav>
-                <section id="settings-appearance" class="settings-section">
-                  <h3>Цветовая тема</h3>
-                  <label class="settings-field">
-                    <span>Тема</span>
-                    <select bind:value={settings.theme} onchange={applyTheme}>
-                      {#each Object.keys(themes) as themeId}<option value={themeId}>{themeId}</option>{/each}
-                      {#each availableUserThemes as theme (theme.id)}<option value={theme.id}>{theme.name} (пользовательская)</option>{/each}
-                    </select>
-                  </label>
-                  <label class="settings-check"><input type="checkbox" bind:checked={settings.themeFollowSystem.enabled} onchange={applyTheme} /> Следовать системной светлой/тёмной теме</label>
-                  {#if settings.themeFollowSystem.enabled}
-                    <label class="settings-field"><span>Светлая тема</span><select bind:value={settings.themeFollowSystem.light} onchange={applyTheme}>{#each Object.keys(themes) as themeId}{#if resolveTheme(themeId).kind === 'light'}<option value={themeId}>{themeId}</option>{/if}{/each}{#each availableUserThemes as theme (theme.id)}{#if theme.type === 'light'}<option value={theme.id}>{theme.name}</option>{/if}{/each}</select></label>
-                    <label class="settings-field"><span>Тёмная тема</span><select bind:value={settings.themeFollowSystem.dark} onchange={applyTheme}>{#each Object.keys(themes) as themeId}{#if resolveTheme(themeId).kind === 'dark'}<option value={themeId}>{themeId}</option>{/if}{/each}{#each availableUserThemes as theme (theme.id)}{#if theme.type === 'dark'}<option value={theme.id}>{theme.name}</option>{/if}{/each}</select></label>
-                    <p class="settings-hint">Сейчас система использует {systemUsesDarkColors ? 'тёмную' : 'светлую'} схему.</p>
-                  {/if}
-                  <div class="settings-actions settings-import">
-                    <label class="button-like">Импортировать тему JSON<input class="visually-hidden" type="file" accept=".json,application/json" onchange={(event) => void importTheme(event)} /></label>
-                    {#each availableUserThemes as theme (theme.id)}<button title={`Удалить тему ${theme.name}`} onclick={() => void deleteUserTheme(theme)}>Удалить «{theme.name}»</button>{/each}
-                  </div>
-                  {#each themeErrors as error (error.file)}<p class="settings-error">{error.file}: {error.message}</p>{/each}
-                </section>
-                <section id="settings-typography" class="settings-section">
-                  <h3>Шрифты и масштаб</h3>
-                  <label class="settings-field">
-                    <span>Шрифт интерфейса</span>
-                    <input list="available-fonts" bind:value={settings.ui.fontFamily} oninput={applyTheme} />
-                  </label>
-                  <label class="settings-field">
-                    <span>Размер интерфейса: {settings.ui.fontSize}px</span>
-                    <input type="range" min="8" max="24" step="1" bind:value={settings.ui.fontSize} oninput={applyTheme} />
-                  </label>
-                  <label class="settings-field">
-                    <span>Шрифт редактора</span>
-                    <input list="available-fonts" bind:value={settings.editor.fontFamily} oninput={applyTheme} />
-                  </label>
-                  <label class="settings-field">
-                    <span>Размер текста: {settings.editor.fontSize}px</span>
-                    <input type="range" min="8" max="48" step="1" bind:value={settings.editor.fontSize} oninput={applyTheme} />
-                  </label>
-                  <label class="settings-field">
-                    <span>Шрифт аннотаций</span>
-                    <input list="available-fonts" bind:value={settings.annotationsPanel.fontFamily} oninput={applyTheme} />
-                  </label>
-                  <label class="settings-field">
-                    <span>Размер аннотаций: {settings.annotationsPanel.fontSize}px</span>
-                    <input type="range" min="8" max="32" step="1" bind:value={settings.annotationsPanel.fontSize} oninput={applyTheme} />
-                  </label>
-                  <button onclick={async () => {
-                    try {
-                      const fontApi = window as Window & { queryLocalFonts?: () => Promise<Array<{ family: string }>> }
-                      const fonts = fontApi.queryLocalFonts ? await fontApi.queryLocalFonts() : []
-                      fontSuggestions = [...new Set([...builtinFonts, ...fonts.map((font) => font.family)])].sort((a, b) => a.localeCompare(b, 'ru'))
-                      status = fonts.length ? `Найдено системных шрифтов: ${fonts.length}` : 'Список системных шрифтов недоступен; доступен встроенный список и ручной ввод'
-                    } catch (error) {
-                      fontSuggestions = builtinFonts
-                      status = `Не удалось прочитать системные шрифты: ${error instanceof Error ? error.message : String(error)}`
-                    }
-                  }}>Загрузить список системных шрифтов</button>
-                  <datalist id="available-fonts">{#each fontSuggestions as font}<option value={font}></option>{/each}</datalist>
-                  <label class="settings-check"><input type="checkbox" bind:checked={settings.editor.ligatures} /> Лигатуры</label>
-                  <label class="settings-field"><span>Высота строки: {settings.editor.lineHeight}</span><input type="range" min="1" max="3" step="0.1" bind:value={settings.editor.lineHeight} oninput={applyTheme} /></label>
-                  <p class="font-preview" style:font-family={settings.editor.fontFamily} style:font-size="{settings.editor.fontSize}px">
-                    Русский текст, English, 123 — «Кавычки», ёж и фрагмент.
-                  </p>
-                  <p class="settings-hint">Ctrl+колесо меняет размер текста, Ctrl+0 сбрасывает его. Семейство шрифта можно ввести вручную.</p>
-                </section>
-                <section id="settings-editor" class="settings-section">
-                  <h3>Отображение</h3>
-                  <label class="settings-field"><span>Масштаб интерфейса: {Math.round(settings.ui.zoom * 100)}%</span><input type="range" min="0.75" max="1.5" step="0.05" bind:value={settings.ui.zoom} oninput={applyTheme} /></label>
-                  <label class="settings-field"><span>Контекст режима фокуса (символы)</span><input type="number" min="0" max="500" bind:value={settings.focusView.contextChars} onchange={() => setFocusMode(focusMode)} /></label>
-                  <label class="settings-field"><span>Разделитель Focus view</span><select bind:value={settings.focusView.separator} onchange={() => setFocusMode(focusMode)}><option value="blank1">Одна пустая строка</option><option value="blank2">Две пустые строки</option><option value="ellipsis">Многоточие</option></select></label>
-                  <label class="settings-check"><input type="checkbox" bind:checked={settings.editor.lineNumbers} onchange={applyTheme} /> Номера строк</label>
-                  <label class="settings-check"><input type="checkbox" bind:checked={settings.editor.readOnly} onchange={applyTheme} /> Редактор только для чтения</label>
-                  <label class="settings-check"><input type="checkbox" bind:checked={settings.editor.wrap} onchange={applyTheme} /> Переносить длинные строки</label>
-                  <label class="settings-field"><span>Толщина шрифта редактора</span><select bind:value={settings.editor.fontWeight} onchange={applyTheme}>{#each [300, 400, 500, 600, 700] as weight}<option value={weight}>{weight}</option>{/each}</select></label>
-                  <label class="settings-field"><span>Максимальная ширина строки (ch)</span><input type="number" min="40" max="240" bind:value={settings.editor.maxLineWidthCh} oninput={applyTheme} /></label>
-                </section>
-                <section id="settings-annotations" class="settings-section">
-                  <h3>Аннотации и отображение</h3>
-                  <label class="settings-check"><input type="checkbox" bind:checked={settings.annotationsPanel.showQuote} /> Показывать цитату в карточке</label>
-                  <label class="settings-check"><input type="checkbox" bind:checked={settings.annotationsPanel.linkScroll} /> Связывать прокрутку текста и аннотаций</label>
-                  <label class="settings-field"><span>Тип новой аннотации</span><select bind:value={settings.annotations.defaultType}>{#each annotationTypes as type}<option value={type.id}>{type.label}</option>{/each}</select></label>
-                  <label class="settings-field"><span>Интенсивность подсветки</span><input type="range" min="0.05" max="0.6" step="0.01" bind:value={settings.annotations.highlightAlpha} oninput={applyTheme} /></label>
-                  <label class="settings-check"><input type="checkbox" bind:checked={settings.annotations.colorByType} onchange={applyTheme} /> Различать цвета аннотаций по типу</label>
-                  <h3>Цвета типов аннотаций</h3>
-                  <label class="settings-field"><span>Единый цвет подсветки</span><input type="color" disabled={settings.annotations.colorByType} value={settings.annotations.highlightColor ?? themeColor('annot.default')} oninput={(event) => { settings.annotations.highlightColor = event.currentTarget.value; applyTheme() }} /></label>
-                  {#each annotationTypes as type (type.id)}
-                    <label class="color-setting">
-                      <span>Цвет: {type.label}</span>
-                      <input type="color" disabled={!settings.annotations.colorByType} value={settings.annotations.types.find((item) => item.id === type.id)?.color ?? themeColor(`annot.${type.id}`)} aria-label={`Цвет типа ${type.label}`} oninput={(event) => setAnnotationTypeColor(type.id, event.currentTarget.value)} />
-                      <button disabled={!settings.annotations.types.find((item) => item.id === type.id)?.color} onclick={() => setAnnotationTypeColor(type.id, null)}>Сбросить</button>
-                    </label>
-                  {/each}
-                </section>
-                <section id="settings-colors" class="settings-section">
-                  <h3>Переопределение цветов</h3>
-                  {#each ['ui.bg', 'ui.fg', 'ui.fgMuted', 'ui.accent', 'ui.border', 'editor.bg', 'editor.fg', 'editor.selection', 'annot.default', 'annot.comment', 'annot.note', 'annot.question', 'annot.idea', 'annot.todo', 'annot.important'] as colorKey (colorKey)}
-                    <label class="color-setting">
-                      <span>{colorKey}</span>
-                      <input type="color" value={settings.colorOverrides[colorKey] ?? themeColor(colorKey)} aria-label={`Цвет ${colorKey}`} oninput={(event) => setThemeColor(colorKey, event.currentTarget.value)} />
-                      <button onclick={() => {
-                        const overrides = { ...settings.colorOverrides }
-                        delete overrides[colorKey]
-                        settings.colorOverrides = overrides
-                        applyTheme()
-                      }}>Сбросить</button>
-                    </label>
-                  {/each}
-                </section>
-                <section id="settings-files" class="settings-section">
-                  <h3>Файлы и сглаживание</h3>
-                  <label class="settings-field"><span>Автосохранение аннотаций</span><input type="checkbox" bind:checked={settings.files.autosave} /></label>
-                  <label class="settings-field"><span>Задержка автосохранения (мс)</span><input type="number" min="250" max="10000" step="250" bind:value={settings.files.autosaveDelayMs} /></label>
-                  <label class="settings-field"><span>Максимум до автосохранения (мс)</span><input type="number" min="1000" max="120000" step="1000" bind:value={settings.files.autosaveMaxWaitMs} /></label>
-                  <label class="settings-check"><input type="checkbox" bind:checked={settings.files.autosavePlain} /> Автосохранение обычных текстовых файлов</label>
-                  <label class="settings-field"><span>Интервал резервирования (мин)</span><input type="number" min="1" max="1440" bind:value={settings.files.backupIntervalMin} /></label>
-                  <label class="settings-field"><span>Формат новых sidecar</span><select bind:value={settings.files.saveFormat}><option value="json">JSON</option><option value="md">Markdown</option></select></label>
-                  <label class="settings-field"><span>Кодировка новых документов</span><select bind:value={settings.files.encoding}>{#each supportedEncodings as supportedEncoding}<option value={supportedEncoding}>{supportedEncoding.toUpperCase()}</option>{/each}</select></label>
-                  <label class="settings-field"><span>Перевод строки новых документов</span><select bind:value={settings.files.defaultEol}><option value="lf">LF</option><option value="crlf">CRLF</option></select></label>
-                  <label class="settings-field"><span>Сглаживание текста</span><select bind:value={settings.rendering.smoothing}><option value="system">Системное (по умолчанию)</option><option value="grayscale">Оттенки серого</option></select></label>
-                  <p class="settings-hint">Изменение сглаживания требует перезапуска.</p>
-                  <div class="settings-actions">
-                    <button onclick={() => void invoke('settings:openFile').catch((error: unknown) => status = `Не удалось открыть settings.json: ${error instanceof Error ? error.message : String(error)}`)}>Открыть settings.json</button>
-                    <button onclick={() => void invoke('app:relaunch').catch((error: unknown) => status = `Не удалось перезапустить: ${error instanceof Error ? error.message : String(error)}`)}>Перезапустить</button>
-                  </div>
-                </section>
-                <section id="settings-shortcuts" class="settings-section">
-                  <h3>Команды и сочетания клавиш</h3>
-                  {#each shortcutConflicts() as conflict}<p class="settings-error">Конфликт сочетания: {conflict}</p>{/each}
-                  {#each commandDefinitions as command (command.id)}
-                    <label class="shortcut-setting">
-                      <span title={command.id}>{command.label}</span>
-                      <input
-                        aria-label={`Сочетание: ${command.label}`}
-                        value={settings.keybindings[command.id] ?? ''}
-                        placeholder={command.shortcut ?? 'нет'}
-                        oninput={(event) => settings.keybindings = { ...settings.keybindings, [command.id]: event.currentTarget.value || null }}
-                      />
-                      <button aria-label={`Сбросить сочетание: ${command.label}`} onclick={() => {
-                        const bindings = { ...settings.keybindings }
-                        delete bindings[command.id]
-                        settings.keybindings = bindings
-                      }}>Сбросить</button>
-                    </label>
-                  {/each}
-                </section>
-              </div>
-              <div class="settings-actions">
-                <button onclick={() => { showSettings = false; void loadSettings() }}>Отмена</button>
-                <button class="accent-button" onclick={() => void saveSettings()}>Сохранить настройки</button>
-              </div>
-            </dialog>
+          <div class="explorer-empty">
+            <span class="empty-visual" aria-hidden="true">
+              <span class="empty-page"></span>
+              <span class="empty-note"></span>
+            </span>
+            <p class="empty-title">Документы под рукой</p>
+            <p class="empty-copy">Откройте папку — файлы появятся здесь с отметками аннотированных глав.</p>
+            <button class="accent-button" onclick={() => void openFolder()}>Открыть папку</button>
+            <button class="ghost-button" onclick={() => void openWorkspace()}>
+              <Icon name="layers" size={14} /><span>Открыть workspace</span>
+            </button>
           </div>
         {/if}
-        <div class="explorer-footer"><button onclick={() => void openFile()}>＋ Открыть отдельный файл</button></div>
-        <section class:collapsed={!showOutline} class="outline-pane">
+
+        <section class:collapsed={!showOutline} class="outline-pane" aria-label="Структура аннотаций">
           <div class="outline-heading">
-            <span>СТРУКТУРА</span>
+            <button class="outline-toggle" aria-expanded={showOutline} title={showOutline ? 'Свернуть навигатор' : 'Развернуть навигатор'} onclick={() => showOutline = !showOutline}>
+              <Icon name={showOutline ? 'chevron-down' : 'chevron-right'} size={14} />
+              <span>Структура</span>
+            </button>
             <span class="count-badge">{outlineRows.length}</span>
-            <button class="icon-button" title={showOutline ? 'Свернуть навигатор' : 'Развернуть навигатор'} aria-expanded={showOutline} onclick={() => showOutline = !showOutline}>{showOutline ? '⌄' : '⌃'}</button>
           </div>
           {#if showOutline}
             <div
@@ -2323,24 +2512,33 @@
               bind:clientHeight={outlineHeight}
               onscroll={() => outlineScrollTop = outlineListHost?.scrollTop ?? 0}
               onkeydown={(event) => {
-              if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
-              event.preventDefault()
-              const current = outlineRows.findIndex((row) => row.id === selectedId)
-              const next = outlineRows[Math.max(0, Math.min(outlineRows.length - 1, current + (event.key === 'ArrowDown' ? 1 : -1)))]
-              if (next) selectAnnotation(annotations.find((annotation) => annotation.id === next.id)!)
-            }}
+                if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
+                event.preventDefault()
+                const current = outlineRows.findIndex((row) => row.id === selectedId)
+                const next = outlineRows[Math.max(0, Math.min(outlineRows.length - 1, current + (event.key === 'ArrowDown' ? 1 : -1)))]
+                if (next) selectAnnotation(annotations.find((annotation) => annotation.id === next.id)!)
+              }}
             >
               {#if !outlineRows.length}
-                <div class="outline-empty">Аннотации появятся здесь</div>
+                <div class="outline-empty">
+                  <Icon name="book-open" size={18} />
+                  <span>Здесь появятся заметки на полях</span>
+                </div>
               {:else}
                 <div class="outline-spacer" style:height="{outlineStart * outlineRowHeight}px"></div>
               {/if}
               {#each visibleOutlineRows as row (row.id)}
-                <button class:chosen={selectedId === row.id} class="outline-row annot-card-{row.type}" onclick={() => {
-                  const annotation = annotations.find((item) => item.id === row.id)
-                  if (annotation) selectAnnotation(annotation)
-                }}>
-                  <span class="outline-type-dot"></span>
+                <button
+                  class:chosen={selectedId === row.id}
+                  class="outline-row annot-card-{row.type}"
+                  role="option"
+                  aria-selected={selectedId === row.id}
+                  onclick={() => {
+                    const annotation = annotations.find((item) => item.id === row.id)
+                    if (annotation) selectAnnotation(annotation)
+                  }}
+                >
+                  <span class="outline-type-dot type-dot annot-dot-{row.type}"></span>
                   <span class="outline-row-content">
                     <span class="outline-quote">{row.quote || 'Без цитаты'}</span>
                     {#if row.note}<span class="outline-note">{row.note}</span>{/if}
@@ -2374,83 +2572,195 @@
               onkeydown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); activateTab(tab.id) } }}
               onmousedown={(event) => { if (event.button === 1) { event.preventDefault(); requestCloseTab(tab.id) } }}
             >
-              {#if tab.annotations.length}<span class="file-glyph" title="Есть аннотации">✳</span>{:else}<span class="file-glyph">≡</span>{/if}
+              <span class="tab-icon" aria-hidden="true"><Icon name="file-text" size={14} /></span>
               <span class="tab-label">{tab.path?.split(/[\\/]/).at(-1) ?? 'Новый документ'}</span>
+              {#if tab.annotations.length}<span class="tab-annotated" title="Есть аннотации"></span>{/if}
               {#if tab.dirty}<span class="dirty-dot" title="Не сохранено"></span>{/if}
-              <button class="tab-close" title="Закрыть вкладку (Ctrl+W)" aria-label="Закрыть {tab.path?.split(/[\\/]/).at(-1) ?? 'Новый документ'}" onclick={(event) => { event.stopPropagation(); requestCloseTab(tab.id) }}>×</button>
+              <button class="tab-close" title="Закрыть вкладку (Ctrl+W)" aria-label="Закрыть {tab.path?.split(/[\\/]/).at(-1) ?? 'Новый документ'}" onclick={(event) => { event.stopPropagation(); requestCloseTab(tab.id) }}>
+                <Icon name="x" size={12} />
+              </button>
             </div>
           {/each}
         </div>
+        <button class="tab-add" onclick={() => void newFile()} title="Новый документ (Ctrl+N)" aria-label="Новый документ">
+          <Icon name="plus" size={15} />
+        </button>
         <span class="tab-spacer"></span>
-        <button class="icon-button" class:active={showExplorer} aria-label="Показать или скрыть проводник" aria-pressed={showExplorer} title="Проводник (Ctrl+B)" onclick={() => showExplorer = !showExplorer}>◧</button>
-        <button class="icon-button" class:active={showAnnotations} aria-label="Показать или скрыть аннотации" aria-pressed={showAnnotations} title="Аннотации (Ctrl+Shift+B)" onclick={() => showAnnotations = !showAnnotations}>▤</button>
+        <div class="layout-actions" role="group" aria-label="Панели">
+          <button class="icon-button compact" class:active={showExplorer} aria-label="Показать или скрыть проводник" aria-pressed={showExplorer} title="Проводник (Ctrl+B)" onclick={() => showExplorer = !showExplorer}>
+            <Icon name="panel-left" size={16} />
+          </button>
+          <button class="icon-button compact" class:active={showAnnotations} aria-label="Показать или скрыть аннотации" aria-pressed={showAnnotations} title="Аннотации (Ctrl+Shift+B)" onclick={() => showAnnotations = !showAnnotations}>
+            <Icon name="panel-right" size={16} />
+          </button>
+        </div>
       </div>
+
       <div class="editor-surface">
         <div class="editor-host" bind:this={editorHost}></div>
-        {#if tabs.length === 0}
+        {#if showWelcome}
           <section class="welcome-screen" aria-labelledby="welcome-title">
-            <div class="welcome-content">
-              <span class="welcome-mark" aria-hidden="true">A</span>
-              <h1 id="welcome-title">Начните работу с текстом</h1>
-              <p>Откройте документ или папку, чтобы читать текст и добавлять к нему аннотации.</p>
-              <div class="welcome-actions">
-                <button class="accent-button" onclick={() => void openFile()}>Открыть документ</button>
-                <button onclick={() => void openFolder()}>Открыть папку</button>
-                <button onclick={newFile}>Создать документ</button>
+            <div class="welcome-inner">
+              <div class="welcome-copy">
+                <h1 id="welcome-title">Читайте внимательно.<br />Записывайте рядом.</h1>
+                <p>Annotator держит текст и мысли на полях в одном спокойном пространстве. Откройте документ или папку, чтобы начать.</p>
+                <div class="welcome-actions">
+                  <button class="accent-button" onclick={() => void openFile()}>
+                    <Icon name="file-text" size={15} /><span>Открыть документ</span>
+                  </button>
+                  <button class="button" onclick={() => void openFolder()}>
+                    <Icon name="folder" size={15} /><span>Открыть папку</span>
+                  </button>
+                  <button class="ghost-button" onclick={() => void newFile()}>Создать документ</button>
+                </div>
+                <div class="welcome-hints">
+                  <span>Открыть документ <kbd>Ctrl</kbd><kbd>O</kbd></span>
+                  <span>Все команды <kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>P</kbd></span>
+                </div>
               </div>
-              <p class="welcome-shortcut">Открыть документ <kbd>Ctrl+O</kbd><span aria-hidden="true"> · </span>Новый документ <kbd>Ctrl+N</kbd></p>
+              <div class="welcome-visual" aria-hidden="true">
+                <span class="visual-sheet">
+                  <span class="visual-line line-a"></span>
+                  <span class="visual-line line-b"></span>
+                  <span class="visual-line line-c"></span>
+                  <span class="visual-line line-d"></span>
+                  <span class="visual-line line-e"></span>
+                  <span class="visual-margin"></span>
+                  <span class="visual-marker marker-comment"></span>
+                  <span class="visual-marker marker-idea"></span>
+                </span>
+                <span class="visual-note note-one"><span class="visual-note-dot dot-comment"></span><span class="visual-note-lines"></span></span>
+                <span class="visual-note note-two"><span class="visual-note-dot dot-important"></span><span class="visual-note-lines"></span></span>
+              </div>
             </div>
           </section>
         {/if}
       </div>
+
       <footer class="statusbar">
-        <span>{dirty ? '● Не сохранено' : '✓ Сохранено'}</span>
-        {#if annotationPath && filePath !== annotationPath && originalText !== null && originalText !== text}
-          <button class="source-diff" onclick={() => void applyTextToSource()} title="Создать резервную копию .bak и применить текст к исходному файлу">
-            Текст отличается от исходника · Применить
-          </button>
-        {/if}
-        <button class="status-action" disabled={!filePath} title="Переоткрыть с другой кодировкой" onclick={() => void reopenWithEncoding()}>{encoding.toUpperCase()}</button>
-        <span>{eol === '\r\n' ? 'CRLF' : eol === '\r' ? 'CR' : 'LF'}</span>
-        <span>Стр. {cursorPosition.line}, стлб. {cursorPosition.column}</span>
-        <span>{annotations.length} {annotationPluralRules.select(annotations.length) === 'one' ? 'аннотация' : annotationPluralRules.select(annotations.length) === 'few' ? 'аннотации' : 'аннотаций'}</span>
+        <div class="status-left">
+          <span class:is-dirty={dirty} class:is-saving={Boolean(savingTabId)} class="status-save">
+            <span class="status-dot"></span>
+            {savingTabId ? 'Сохранение…' : dirty ? 'Не сохранено' : 'Сохранено'}
+          </span>
+          <span class="status-item status-file" title={filePath ?? 'Новый документ'}>
+            <Icon name="file-text" size={13} /><span>{fileName}</span>
+          </span>
+          <span class="status-item status-format" title="Формат файла аннотаций">{annotationFormat}</span>
+          {#if annotationPath && filePath !== annotationPath && originalText !== null && originalText !== text}
+            <button class="status-diff" onclick={() => void applyTextToSource()} title="Создать резервную копию .bak и применить текст к исходному файлу">
+              <Icon name="alert" size={12} />
+              <span>Текст отличается от исходника</span>
+              <span class="status-diff-action">Применить</span>
+            </button>
+          {/if}
+        </div>
         <span class="status-message" role="status" aria-live="polite">{status}</span>
+        <div class="status-right">
+          <span class="status-item">{annotationCountLabel(annotations.length)}</span>
+          <button class="status-item status-action" disabled={!filePath} title="Переоткрыть с другой кодировкой" onclick={() => void reopenWithEncoding()}>{encoding.toUpperCase()}</button>
+          <span class="status-item">{eol === '\r\n' ? 'CRLF' : eol === '\r' ? 'CR' : 'LF'}</span>
+          <span class="status-item">Стр. {cursorPosition.line}, стлб. {cursorPosition.column}</span>
+        </div>
       </footer>
     </main>
 
     {#if showAnnotations && !focusMode}
       <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
       <div class="pane-resizer" role="separator" aria-orientation="vertical" aria-label="Ширина панели аннотаций" aria-valuemin="270" aria-valuemax="460" aria-valuenow={annotationsRenderedWidth} tabindex="0" use:resizablePane={'annotations'}></div>
-      <aside class="annotations pane" style:width="{annotationWidth}px" style:flex-basis="{annotationWidth}px" use:measurePaneWidth={'annotations'}>
-        <div class="pane-heading"><span>АННОТАЦИИ</span><span class="count-badge">{annotations.length}</span></div>
-        <input class="search-input" bind:value={query} oninput={() => { annotationScrollTop = 0; if (annotationScrollHost) annotationScrollHost.scrollTop = 0 }} placeholder="Поиск по заметкам и тегам" aria-label="Поиск по аннотациям" />
-        <div class="annotation-filters">
-          <select bind:value={filterType} onchange={() => { annotationScrollTop = 0; if (annotationScrollHost) annotationScrollHost.scrollTop = 0 }} aria-label="Фильтр по типу аннотации">
-            <option value="all">Все типы</option>
-            {#each annotationTypes as type}<option value={type.id}>{type.label}</option>{/each}
-          </select>
-          <label><input type="checkbox" bind:checked={hideResolved} /> Скрыть решённые</label>
+      <aside class="annotations pane" style:width="{annotationWidth}px" style:flex-basis="{annotationWidth}px" use:measurePaneWidth={'annotations'} aria-label="Аннотации">
+        <div class="pane-header">
+          <div class="pane-title"><Icon name="message-plus" size={15} /><span>Аннотации</span><span class="count-badge">{annotations.length}</span></div>
+          <div class="pane-actions">
+            <button class="icon-button compact" onclick={() => void createAnnotation()} title="Новая аннотация из выделения" aria-label="Новая аннотация из выделения">
+              <Icon name="plus" size={15} />
+            </button>
+          </div>
         </div>
+
+        <div class="annotations-toolbar">
+          <div class="search-field">
+            <Icon name="search" size={15} />
+            <input
+              class="search-input"
+              bind:value={query}
+              oninput={() => { annotationScrollTop = 0; if (annotationScrollHost) annotationScrollHost.scrollTop = 0 }}
+              placeholder="Поиск по заметкам и тегам"
+              aria-label="Поиск по аннотациям"
+            />
+            {#if query}
+              <button class="search-clear" aria-label="Очистить поиск" onclick={() => { query = ''; annotationScrollTop = 0; if (annotationScrollHost) annotationScrollHost.scrollTop = 0; annotationScrollHost?.focus() }}>
+                <Icon name="x" size={13} />
+              </button>
+            {/if}
+          </div>
+          <div class="filter-row">
+            <label class="select-wrap compact" title="Фильтр по типу">
+              <select bind:value={filterType} onchange={() => { annotationScrollTop = 0; if (annotationScrollHost) annotationScrollHost.scrollTop = 0 }} aria-label="Фильтр по типу аннотации">
+                <option value="all">Все типы</option>
+                {#each annotationTypes as type}<option value={type.id}>{type.label}</option>{/each}
+              </select>
+              <Icon name="chevron-down" size={12} />
+            </label>
+            <button class="filter-toggle" class:active={hideResolved} aria-pressed={hideResolved} onclick={() => { hideResolved = !hideResolved; annotationScrollTop = 0; if (annotationScrollHost) annotationScrollHost.scrollTop = 0 }}>
+              <Icon name="check-circle" size={13} /><span>Без решённых</span>
+            </button>
+            <label class="select-wrap compact sort-wrap" title="Порядок аннотаций">
+              <Icon name="sort" size={12} />
+              <select bind:value={settings.annotationsPanel.sort} onchange={() => { annotationScrollTop = 0; if (annotationScrollHost) annotationScrollHost.scrollTop = 0; scheduleSettingsSave() }} aria-label="Порядок аннотаций">
+                <option value="position">По тексту</option>
+                <option value="created">По созданию</option>
+                <option value="modified">По изменению</option>
+              </select>
+              <Icon name="chevron-down" size={12} />
+            </label>
+          </div>
+        </div>
+
         {#if pendingSelection.from !== pendingSelection.to}
-          <section class="note-composer">
-            <div class="composer-title">Новая аннотация</div>
-            <div class="quote-preview">“{editor?.state.doc.sliceString(pendingSelection.from, pendingSelection.to).slice(0, 120)}”</div>
-            <select bind:value={noteType} aria-label="Тип аннотации">
-              {#each annotationTypes as type}<option value={type.id}>{type.label}</option>{/each}
-            </select>
-            <textarea bind:this={noteInput} bind:value={noteDraft} rows="4" placeholder="Текст заметки в Markdown…" onkeydown={(event) => {
-              if (event.ctrlKey && !event.altKey && !event.metaKey && event.code === 'Enter') {
-                event.preventDefault()
-                confirmAnnotation()
-              }
-            }}></textarea>
-            <div class="composer-actions"><button onclick={() => { pendingSelection = { from: 0, to: 0 }; noteDraft = '' }}>Отмена</button><button class="accent-button" onclick={confirmAnnotation}>Добавить</button></div>
+          <section class="note-composer" aria-label="Новая аннотация">
+            <div class="composer-heading">
+              <span class="composer-label"><span class="composer-pip"></span>Новая аннотация</span>
+            </div>
+            <div class="quote-preview">“{editor?.state.doc.sliceString(pendingSelection.from, pendingSelection.to).slice(0, 160)}”</div>
+            <div class="type-chips" role="radiogroup" aria-label="Тип аннотации">
+              {#each annotationTypes as type (type.id)}
+                <button class="type-chip" class:active={noteType === type.id} role="radio" aria-checked={noteType === type.id} onclick={() => noteType = type.id}>
+                  <span class="type-dot annot-dot-{type.id}"></span>{type.label}
+                </button>
+              {/each}
+            </div>
+            <textarea
+              bind:this={noteInput}
+              bind:value={noteDraft}
+              rows="3"
+              placeholder="Что важно в этом фрагменте?"
+              aria-label="Текст аннотации"
+              onkeydown={(event) => {
+                if (event.ctrlKey && !event.altKey && !event.metaKey && event.code === 'Enter') {
+                  event.preventDefault()
+                  confirmAnnotation()
+                }
+              }}
+            ></textarea>
+            <div class="composer-footer">
+              <span class="composer-hint">Ctrl+Enter</span>
+              <div class="composer-actions">
+                <button class="ghost-button" onclick={() => { pendingSelection = { from: 0, to: 0 }; noteDraft = '' }}>Отмена</button>
+                <button class="accent-button" onclick={confirmAnnotation}>Добавить</button>
+              </div>
+            </div>
           </section>
         {/if}
+
         {#if annotations.some((annotation) => annotation.orphan)}
           <section class="orphan-group">
             <button class="orphan-heading" aria-expanded={showOrphans} onclick={() => showOrphans = !showOrphans}>
-              <span>{showOrphans ? '⌄' : '›'} БЕЗ ПРИВЯЗКИ</span>
+              <span class="orphan-heading-label">
+                <Icon name={showOrphans ? 'chevron-down' : 'chevron-right'} size={13} />
+                <Icon name="alert" size={13} />
+                <span>Без привязки</span>
+              </span>
               <span class="count-badge">{annotations.filter((annotation) => annotation.orphan).length}</span>
             </button>
             {#if showOrphans}
@@ -2462,23 +2772,26 @@
                 bind:clientHeight={orphanViewportHeight}
                 onscroll={() => orphanScrollTop = orphanScrollHost?.scrollTop ?? 0}
               >
-              {#if orphanWindow.top > 0}<div class="virtual-spacer" aria-hidden="true" style:height="{orphanWindow.top}px"></div>{/if}
-              {#each virtualOrphanAnnotations as annotation, index (annotation.id)}
-                <article use:measureAnnotation={annotation.id} role="listitem" aria-posinset={orphanWindow.start + index + 1} aria-setsize={visibleOrphanAnnotations.length} class:chosen={selectedId === annotation.id} class="orphan-card">
-                  {#if settings.annotationsPanel.showQuote}<div class="annotation-quote">“{annotation.quote.slice(0, 120)}”</div>{/if}
-                  <div class="annotation-rendered">{@html renderMarkdown(annotation.text || '*Пустая заметка*')}</div>
-                  <div class="orphan-actions">
-                    <button disabled={!editor || editor.state.selection.main.empty} title="Привязать к текущему выделению" onclick={() => rebindOrphan(annotation.id)}>Привязать к выделению</button>
-                    <button title="Найти цитату в документе" onclick={() => findOrphanAgain(annotation)}>Найти заново</button>
-                    <button class="delete-button" title="Удалить аннотацию" onclick={() => removeAnnotation(annotation.id)}>×</button>
-                  </div>
-                </article>
-              {/each}
-              {#if orphanWindow.bottom > 0}<div class="virtual-spacer" aria-hidden="true" style:height="{orphanWindow.bottom}px"></div>{/if}
+                {#if orphanWindow.top > 0}<div class="virtual-spacer" aria-hidden="true" style:height="{orphanWindow.top}px"></div>{/if}
+                {#each virtualOrphanAnnotations as annotation, index (annotation.id)}
+                  <article use:measureAnnotation={annotation.id} role="listitem" aria-posinset={orphanWindow.start + index + 1} aria-setsize={visibleOrphanAnnotations.length} class:chosen={selectedId === annotation.id} class="orphan-card">
+                    {#if settings.annotationsPanel.showQuote}<div class="annotation-quote">“{annotation.quote.slice(0, 120)}”</div>{/if}
+                    <div class="annotation-rendered">{@html renderMarkdown(annotation.text || '*Пустая заметка*')}</div>
+                    <div class="orphan-actions">
+                      <button class="mini-button" disabled={!editor || editor.state.selection.main.empty} title="Привязать к текущему выделению" onclick={() => rebindOrphan(annotation.id)}>Привязать к выделению</button>
+                      <button class="mini-button" title="Найти цитату в документе" onclick={() => findOrphanAgain(annotation)}>Найти заново</button>
+                      <button class="icon-button compact delete-button" title="Удалить аннотацию" aria-label="Удалить аннотацию" onclick={() => removeAnnotation(annotation.id)}>
+                        <Icon name="trash" size={14} />
+                      </button>
+                    </div>
+                  </article>
+                {/each}
+                {#if orphanWindow.bottom > 0}<div class="virtual-spacer" aria-hidden="true" style:height="{orphanWindow.bottom}px"></div>{/if}
               </div>
             {/if}
           </section>
         {/if}
+
         <div
           class="annotation-list"
           role="toolbar"
@@ -2491,28 +2804,87 @@
           onkeydown={handleAnnotationListKeydown}
         >
           {#if visibleLinkedAnnotations.length === 0}
-            <div class="empty-hint annotation-empty"><span class="empty-icon">✳</span><p>{annotations.length ? 'Совпадений не найдено.' : 'Выделите фрагмент текста и нажмите «＋ Аннотация», чтобы добавить заметку.'}</p></div>
+            <div class="pane-empty annotation-empty">
+              <span class="pane-empty-icon"><Icon name="message-plus" size={22} /></span>
+              <p>{annotations.length ? 'Ничего не найдено. Измените запрос или фильтры.' : 'Выделите фрагмент текста и создайте первую заметку.'}</p>
+              {#if !annotations.length}
+                <p class="pane-empty-hint"><kbd>Ctrl</kbd><span>+</span><kbd>Shift</kbd><span>+</span><kbd>A</kbd></p>
+              {/if}
+            </div>
           {/if}
           {#if linkedWindow.top > 0}<div class="virtual-spacer" aria-hidden="true" style:height="{linkedWindow.top}px"></div>{/if}
           {#each virtualLinkedAnnotations as annotation (annotation.id)}
-            <article use:measureAnnotation={annotation.id} data-annotation-id={annotation.id} role="group" aria-label={`${annotation.type}: ${annotation.quote.slice(0, 80)}`} class:chosen={selectedId === annotation.id} class:orphan={annotation.orphan} class="annotation-card annot-card-{annotation.type}">
-              <div class="card-heading">
-                <span class="type-dot"></span>
-                <select aria-label="Тип аннотации" value={annotation.type} onclick={(event) => event.stopPropagation()} onchange={(event) => updateAnnotation(annotation.id, { type: event.currentTarget.value }, true)}>
-                  {#each annotationTypes as type}<option value={type.id}>{type.label}</option>{/each}
-                </select>
-                <button class="resolve-button" class:resolved={annotation.resolved} title={annotation.resolved ? 'Снова открыть' : 'Отметить решённой'} onclick={(event) => { event.stopPropagation(); updateAnnotation(annotation.id, { resolved: !annotation.resolved }, true) }}>{annotation.resolved ? '✓' : '○'}</button>
-                <button class="delete-button" title="Удалить аннотацию" onclick={(event) => { event.stopPropagation(); removeAnnotation(annotation.id) }}>×</button>
-              </div>
-              <button class="card-main" aria-pressed={selectedId === annotation.id} onclick={() => selectAnnotation(annotation)} ondblclick={() => editNoteId = annotation.id}>
-                {#if settings.annotationsPanel.showQuote}<div class="annotation-quote">{annotation.orphan ? 'Без привязки' : `“${annotation.quote.slice(0, 120)}”`}</div>{/if}
+            <article
+              use:measureAnnotation={annotation.id}
+              data-annotation-id={annotation.id}
+              role="group"
+              aria-label={`${annotation.type}: ${annotation.quote.slice(0, 80)}`}
+              class:chosen={selectedId === annotation.id}
+              class:is-resolved={annotation.resolved}
+              class="annotation-card annot-card-{annotation.type}"
+            >
+              <header class="card-heading">
+                <span class="type-dot annot-dot-{annotation.type}"></span>
+                <label class="select-wrap type-select-wrap">
+                  <span class="visually-hidden">Тип аннотации</span>
+                  <select aria-label="Тип аннотации" value={annotation.type} onclick={(event) => event.stopPropagation()} onchange={(event) => updateAnnotation(annotation.id, { type: event.currentTarget.value }, true)}>
+                    {#each annotationTypes as type}<option value={type.id}>{type.label}</option>{/each}
+                  </select>
+                  <Icon name="chevron-down" size={11} />
+                </label>
+                {#if annotation.orphan}
+                  <span class="line-badge is-orphan">Без привязки</span>
+                {:else}
+                  <button class="line-badge" title="Перейти к фрагменту" onclick={(event) => { event.stopPropagation(); selectAnnotation(annotation) }}>Стр. {lineNumberAt(lineStarts, annotation.start)}</button>
+                {/if}
+                <span class="card-spacer"></span>
+                <button class="icon-button compact resolve-button" class:resolved={annotation.resolved} aria-pressed={annotation.resolved} aria-label={annotation.resolved ? 'Снова открыть' : 'Отметить решённой'} title={annotation.resolved ? 'Снова открыть' : 'Отметить решённой'} onclick={(event) => { event.stopPropagation(); updateAnnotation(annotation.id, { resolved: !annotation.resolved }, true) }}>
+                  <Icon name={annotation.resolved ? 'check-circle' : 'circle'} size={15} />
+                </button>
+                <button class="icon-button compact delete-button" aria-label="Удалить аннотацию" title="Удалить аннотацию" onclick={(event) => { event.stopPropagation(); removeAnnotation(annotation.id) }}>
+                  <Icon name="trash" size={14} />
+                </button>
+              </header>
+              <button
+                class="card-main"
+                aria-pressed={selectedId === annotation.id}
+                onclick={() => selectAnnotation(annotation)}
+                ondblclick={() => editNoteId = annotation.id}
+                title="Перейти к фрагменту. Двойной щелчок — изменить заметку"
+              >
+                {#if settings.annotationsPanel.showQuote}
+                  <span class="annotation-quote">{annotation.orphan ? 'Фрагмент не найден в тексте' : `“${annotation.quote.slice(0, 160)}”`}</span>
+                {/if}
               </button>
-              <div class="annotation-rendered" role="button" aria-label="Текст заметки" tabindex="0" onclick={(event) => openNoteLink(event, annotation)} onkeydown={(event) => openNoteLink(event, annotation)}>{@html renderMarkdown(annotation.text || '*Двойной щелчок, чтобы добавить заметку…*')}</div>
               {#if editNoteId === annotation.id}
-                <textarea class="annotation-body" aria-label="Текст заметки" rows="3" value={annotation.text} oninput={(event) => updateAnnotation(annotation.id, { text: event.currentTarget.value })} onkeydown={(event) => { if (event.key === 'Escape') editNoteId = null }} onblur={() => editNoteId = null} placeholder="Текст заметки в Markdown…"></textarea>
+                <textarea
+                  class="annotation-body"
+                  aria-label="Текст заметки"
+                  rows="3"
+                  value={annotation.text}
+                  placeholder="Текст заметки в Markdown…"
+                  oninput={(event) => updateAnnotation(annotation.id, { text: event.currentTarget.value })}
+                  onkeydown={(event) => { if (event.key === 'Escape') editNoteId = null }}
+                  onblur={() => editNoteId = null}
+                ></textarea>
+              {:else}
+                <div
+                  class="annotation-rendered"
+                  role="button"
+                  aria-label="Текст заметки"
+                  tabindex="0"
+                  onclick={(event) => openNoteLink(event, annotation)}
+                  onkeydown={(event) => openNoteLink(event, annotation)}
+                  ondblclick={(event) => { event.stopPropagation(); editNoteId = annotation.id }}
+                >{@html renderMarkdown(annotation.text || '*Двойной щелчок, чтобы добавить заметку…*')}</div>
               {/if}
-              {#if annotation.tags.length}<div class="tag-row">{#each annotation.tags as tag}<span>#{tag}</span>{/each}</div>{/if}
+              {#if annotation.tags.length}
+                <div class="tag-row">
+                  {#each annotation.tags as tag}<span class="tag-pill">#{tag}</span>{/each}
+                </div>
+              {/if}
               <div class="tag-editor">
+                <Icon name="tag" size={12} />
                 <input
                   aria-label="Добавить тег к аннотации"
                   placeholder="Добавить тег…"
@@ -2522,12 +2894,19 @@
                   onblur={() => { if (tagDrafts[annotation.id]?.trim()) commitTags(annotation.id) }}
                 />
               </div>
+              <footer class="card-footer">
+                <span class="card-date" title={formatAnnotationDateFull(annotation.modified)}>{formatAnnotationDate(annotation.modified)}</span>
+                {#if annotation.resolved}
+                  <span class="resolved-pill"><Icon name="check" size={11} />Решено</span>
+                {/if}
+              </footer>
             </article>
           {/each}
           {#if linkedWindow.bottom > 0}<div class="virtual-spacer" aria-hidden="true" style:height="{linkedWindow.bottom}px"></div>{/if}
         </div>
       </aside>
     {/if}
+
     {#if selectionTrigger && selectionTrigger.from !== selectionTrigger.to && pendingSelection.from === pendingSelection.to && !focusMode}
       <button
         class="selection-trigger"
@@ -2535,95 +2914,630 @@
         style:top="{selectionTrigger.top}px"
         onmousedown={(event) => event.preventDefault()}
         onclick={() => void createAnnotation()}
-      >＋ Аннотация</button>
+      ><Icon name="message-plus" size={14} /><span>Аннотация</span></button>
     {/if}
   </div>
 </div>
 
+{#if showSettings}
+  <div class="modal-backdrop">
+    <dialog open class="settings-dialog" aria-modal="true" aria-labelledby="settings-title" use:modalDialog>
+      <aside class="settings-sidebar">
+        <div class="settings-brand">
+          <span class="brand-mark small" aria-hidden="true">
+            <svg viewBox="0 0 20 20" fill="none">
+              <path d="M4.5 5.5h7M4.5 10h11M4.5 14.5h6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+              <circle cx="15.5" cy="5.5" r="1.5" fill="currentColor" />
+            </svg>
+          </span>
+          <span class="settings-brand-copy"><strong>Настройки</strong><span>Annotator</span></span>
+        </div>
+        <nav class="settings-nav" aria-label="Разделы настроек">
+          {#each settingsSections as section (section.id)}
+            <button class:active={settingsSection === section.id} onclick={() => settingsSection = section.id}>
+              <Icon name={section.icon} size={16} /><span>{section.label}</span>
+            </button>
+          {/each}
+        </nav>
+      </aside>
+
+      <div class="settings-main">
+        <header class="settings-header">
+          <div class="settings-heading">
+            <h2 id="settings-title">{activeSettingsSection.title}</h2>
+            <p>{activeSettingsSection.description}</p>
+          </div>
+          <button class="icon-button" aria-label="Закрыть настройки" title="Закрыть" onclick={closeSettings}>
+            <Icon name="x" size={16} />
+          </button>
+        </header>
+
+        <div class="settings-body">
+          {#if settingsSection === 'appearance'}
+            <section class="setting-group">
+              <div class="group-heading">
+                <h3>Тема</h3>
+                <p>Выберите палитру для чтения и работы.</p>
+              </div>
+              <label class="setting-row switch-row">
+                <span class="setting-copy">
+                  <span class="setting-title">Следовать теме Windows</span>
+                  <span class="setting-hint">Переключаться между светлой и тёмной темой вместе с системой.</span>
+                </span>
+                <input type="checkbox" role="switch" class="switch-input" aria-label="Следовать теме Windows" bind:checked={settings.themeFollowSystem.enabled} onchange={applyTheme} />
+              </label>
+              {#if settings.themeFollowSystem.enabled}
+                <label class="setting-row">
+                  <span class="setting-copy"><span class="setting-title">Светлая тема</span><span class="setting-hint">Используется, когда Windows в светлом режиме.</span></span>
+                  <span class="select-wrap">
+                    <select bind:value={settings.themeFollowSystem.light} onchange={applyTheme} aria-label="Светлая тема">
+                      {#each lightThemeOptions as option (option.id)}<option value={option.id}>{option.name}</option>{/each}
+                    </select>
+                    <Icon name="chevron-down" size={12} />
+                  </span>
+                </label>
+                <label class="setting-row">
+                  <span class="setting-copy"><span class="setting-title">Тёмная тема</span><span class="setting-hint">Используется, когда Windows в тёмном режиме.</span></span>
+                  <span class="select-wrap">
+                    <select bind:value={settings.themeFollowSystem.dark} onchange={applyTheme} aria-label="Тёмная тема">
+                      {#each darkThemeOptions as option (option.id)}<option value={option.id}>{option.name}</option>{/each}
+                    </select>
+                    <Icon name="chevron-down" size={12} />
+                  </span>
+                </label>
+                <p class="inline-note"><Icon name="info" size={13} />Сейчас Windows использует {systemUsesDarkColors ? 'тёмное' : 'светлое'} оформление.</p>
+              {:else}
+                {@render ThemeGallery()}
+              {/if}
+            </section>
+            <section class="setting-group">
+              <div class="group-heading">
+                <h3>Свои темы</h3>
+                <p>Импортируйте палитру в формате JSON — она появится в списке тем.</p>
+              </div>
+              <div class="inline-actions">
+                <label class="button file-button">
+                  <Icon name="plus" size={15} /><span>Импортировать тему</span>
+                  <input class="visually-hidden" type="file" accept=".json,application/json" onchange={(event) => void importTheme(event)} />
+                </label>
+              </div>
+              {#each availableUserThemes as theme (theme.id)}
+                <div class="user-theme-row">
+                  <span class="user-theme-name">{theme.name}<span class="user-theme-kind">{theme.type === 'dark' ? 'Тёмная' : 'Светлая'}</span></span>
+                  <button class="mini-button danger-text" title={`Удалить тему ${theme.name}`} onclick={() => void deleteUserTheme(theme)}>
+                    <Icon name="trash" size={14} /><span>Удалить</span>
+                  </button>
+                </div>
+              {:else}
+                <p class="inline-note">Пользовательских тем пока нет.</p>
+              {/each}
+              {#each themeErrors as error (error.file)}<p class="settings-error">{error.file}: {error.message}</p>{/each}
+            </section>
+          {/if}
+
+          {#if settingsSection === 'typography'}
+            <section class="setting-group">
+              <div class="group-heading"><h3>Интерфейс</h3><p>Панели, меню и подписи.</p></div>
+              <label class="setting-block">
+                <span class="setting-title">Шрифт интерфейса</span>
+                <input list="available-fonts" bind:value={settings.ui.fontFamily} oninput={applyTheme} />
+              </label>
+              <label class="setting-row">
+                <span class="setting-copy"><span class="setting-title">Размер интерфейса</span><span class="setting-hint">Влияет на панели и элементы управления.</span></span>
+                <span class="range-control">
+                  <input type="range" min="8" max="24" step="1" bind:value={settings.ui.fontSize} oninput={applyTheme} aria-label="Размер шрифта интерфейса" />
+                  <output>{settings.ui.fontSize} px</output>
+                </span>
+              </label>
+            </section>
+            <section class="setting-group">
+              <div class="group-heading"><h3>Текст документа</h3><p>Основной шрифт для чтения и правки.</p></div>
+              <label class="setting-block">
+                <span class="setting-title">Шрифт редактора</span>
+                <input list="available-fonts" bind:value={settings.editor.fontFamily} oninput={applyTheme} />
+              </label>
+              <label class="setting-row">
+                <span class="setting-copy"><span class="setting-title">Размер текста</span><span class="setting-hint">Ctrl+колесо также меняет размер.</span></span>
+                <span class="range-control">
+                  <input type="range" min="8" max="48" step="1" bind:value={settings.editor.fontSize} oninput={applyTheme} aria-label="Размер шрифта редактора" />
+                  <output>{settings.editor.fontSize} px</output>
+                </span>
+              </label>
+              <label class="setting-row">
+                <span class="setting-copy"><span class="setting-title">Высота строки</span></span>
+                <span class="range-control">
+                  <input type="range" min="1" max="3" step="0.1" bind:value={settings.editor.lineHeight} oninput={applyTheme} aria-label="Высота строки" />
+                  <output>{settings.editor.lineHeight}</output>
+                </span>
+              </label>
+              <label class="setting-row switch-row">
+                <span class="setting-copy"><span class="setting-title">Лигатуры</span><span class="setting-hint">Показывать связанные символы в шрифтах, которые их поддерживают.</span></span>
+                <input type="checkbox" role="switch" class="switch-input" aria-label="Лигатуры" bind:checked={settings.editor.ligatures} onchange={applyTheme} />
+              </label>
+              <p class="font-preview" style:font-family={settings.editor.fontFamily} style:font-size="{settings.editor.fontSize}px" style:line-height={settings.editor.lineHeight}>
+                Русский текст, English, 123 — «Кавычки», ёж и фрагмент.
+              </p>
+            </section>
+            <section class="setting-group">
+              <div class="group-heading"><h3>Заметки на полях</h3><p>Шрифт карточек и композера аннотаций.</p></div>
+              <label class="setting-block">
+                <span class="setting-title">Шрифт аннотаций</span>
+                <input list="available-fonts" bind:value={settings.annotationsPanel.fontFamily} oninput={applyTheme} />
+              </label>
+              <label class="setting-row">
+                <span class="setting-copy"><span class="setting-title">Размер аннотаций</span></span>
+                <span class="range-control">
+                  <input type="range" min="8" max="32" step="1" bind:value={settings.annotationsPanel.fontSize} oninput={applyTheme} aria-label="Размер шрифта аннотаций" />
+                  <output>{settings.annotationsPanel.fontSize} px</output>
+                </span>
+              </label>
+              <div class="inline-actions">
+                <button class="button" onclick={async () => {
+                  try {
+                    const fontApi = window as Window & { queryLocalFonts?: () => Promise<Array<{ family: string }>> }
+                    const fonts = fontApi.queryLocalFonts ? await fontApi.queryLocalFonts() : []
+                    fontSuggestions = [...new Set([...builtinFonts, ...fonts.map((font) => font.family)])].sort((a, b) => a.localeCompare(b, 'ru'))
+                    status = fonts.length ? `Найдено системных шрифтов: ${fonts.length}` : 'Список системных шрифтов недоступен; доступен встроенный список и ручной ввод'
+                  } catch (error) {
+                    fontSuggestions = builtinFonts
+                    status = `Не удалось прочитать системные шрифты: ${error instanceof Error ? error.message : String(error)}`
+                  }
+                }}>
+                  <Icon name="type" size={15} /><span>Загрузить системные шрифты</span>
+                </button>
+              </div>
+              <datalist id="available-fonts">{#each fontSuggestions as font}<option value={font}></option>{/each}</datalist>
+              <p class="inline-note">Семейство шрифта можно ввести вручную, даже если его нет в списке.</p>
+            </section>
+          {/if}
+
+          {#if settingsSection === 'editor'}
+            <section class="setting-group">
+              <div class="group-heading"><h3>Полотно текста</h3><p>Как документ выглядит во время чтения.</p></div>
+              <label class="setting-row switch-row">
+                <span class="setting-copy"><span class="setting-title">Номера строк</span><span class="setting-hint">Показывать нумерацию вдоль левого края.</span></span>
+                <input type="checkbox" role="switch" class="switch-input" aria-label="Номера строк" bind:checked={settings.editor.lineNumbers} onchange={applyTheme} />
+              </label>
+              <label class="setting-row switch-row">
+                <span class="setting-copy"><span class="setting-title">Переносить длинные строки</span><span class="setting-hint">Текст остаётся в пределах удобной ширины страницы.</span></span>
+                <input type="checkbox" role="switch" class="switch-input" aria-label="Переносить длинные строки" bind:checked={settings.editor.wrap} onchange={applyTheme} />
+              </label>
+              <label class="setting-row switch-row">
+                <span class="setting-copy"><span class="setting-title">Редактор только для чтения</span><span class="setting-hint">Защитить текст от случайных правок.</span></span>
+                <input type="checkbox" role="switch" class="switch-input" aria-label="Редактор только для чтения" bind:checked={settings.editor.readOnly} onchange={applyTheme} />
+              </label>
+              <label class="setting-row">
+                <span class="setting-copy"><span class="setting-title">Максимальная ширина строки</span><span class="setting-hint">В символах. Меньше — спокойнее чтение.</span></span>
+                <span class="number-wrap"><input type="number" min="40" max="240" bind:value={settings.editor.maxLineWidthCh} oninput={applyTheme} aria-label="Максимальная ширина строки" /><span>ch</span></span>
+              </label>
+              <label class="setting-row">
+                <span class="setting-copy"><span class="setting-title">Толщина шрифта</span></span>
+                <span class="select-wrap">
+                  <select bind:value={settings.editor.fontWeight} onchange={applyTheme} aria-label="Толщина шрифта редактора">
+                    {#each [300, 400, 500, 600, 700] as weight}<option value={weight}>{weight}</option>{/each}
+                  </select>
+                  <Icon name="chevron-down" size={12} />
+                </span>
+              </label>
+            </section>
+            <section class="setting-group">
+              <div class="group-heading"><h3>Масштаб и фокус</h3><p>Плотность интерфейса и режим чтения только заметок.</p></div>
+              <label class="setting-row">
+                <span class="setting-copy"><span class="setting-title">Масштаб интерфейса</span><span class="setting-hint">Увеличивает все панели сразу.</span></span>
+                <span class="range-control">
+                  <input type="range" min="0.75" max="1.5" step="0.05" bind:value={settings.ui.zoom} oninput={applyTheme} aria-label="Масштаб интерфейса" />
+                  <output>{Math.round(settings.ui.zoom * 100)}%</output>
+                </span>
+              </label>
+              <label class="setting-row">
+                <span class="setting-copy"><span class="setting-title">Контекст режима фокуса</span><span class="setting-hint">Сколько символов вокруг заметки показывать при F9.</span></span>
+                <span class="number-wrap"><input type="number" min="0" max="500" bind:value={settings.focusView.contextChars} onchange={() => setFocusMode(focusMode)} aria-label="Контекст режима фокуса" /><span>симв.</span></span>
+              </label>
+              <label class="setting-row">
+                <span class="setting-copy"><span class="setting-title">Разделитель фрагментов</span></span>
+                <span class="select-wrap">
+                  <select bind:value={settings.focusView.separator} onchange={() => setFocusMode(focusMode)} aria-label="Разделитель фрагментов">
+                    <option value="blank1">Одна пустая строка</option>
+                    <option value="blank2">Две пустые строки</option>
+                    <option value="ellipsis">Многоточие</option>
+                  </select>
+                  <Icon name="chevron-down" size={12} />
+                </span>
+              </label>
+              <p class="inline-note"><Icon name="focus" size={13} />F9 скрывает панели и оставляет только фрагменты с аннотациями. Выйти можно клавишей F9 или Escape.</p>
+            </section>
+          {/if}
+
+          {#if settingsSection === 'annotations'}
+            <section class="setting-group">
+              <div class="group-heading"><h3>Панель заметок</h3><p>Что показывать в карточках и как связывать их с текстом.</p></div>
+              <label class="setting-row switch-row">
+                <span class="setting-copy"><span class="setting-title">Показывать цитату</span><span class="setting-hint">Фрагмент текста в верхней части карточки.</span></span>
+                <input type="checkbox" role="switch" class="switch-input" aria-label="Показывать цитату" bind:checked={settings.annotationsPanel.showQuote} />
+              </label>
+              <label class="setting-row switch-row">
+                <span class="setting-copy"><span class="setting-title">Связывать прокрутку</span><span class="setting-hint">Выбор заметки прокручивает текст к фрагменту.</span></span>
+                <input type="checkbox" role="switch" class="switch-input" aria-label="Связывать прокрутку" bind:checked={settings.annotationsPanel.linkScroll} />
+              </label>
+              <label class="setting-row">
+                <span class="setting-copy"><span class="setting-title">Тип новой аннотации</span></span>
+                <span class="select-wrap">
+                  <select bind:value={settings.annotations.defaultType} aria-label="Тип новой аннотации">
+                    {#each annotationTypes as type}<option value={type.id}>{type.label}</option>{/each}
+                  </select>
+                  <Icon name="chevron-down" size={12} />
+                </span>
+              </label>
+              <label class="setting-row">
+                <span class="setting-copy"><span class="setting-title">Порядок по умолчанию</span></span>
+                <span class="select-wrap">
+                  <select bind:value={settings.annotationsPanel.sort} aria-label="Порядок аннотаций по умолчанию">
+                    <option value="position">По тексту</option>
+                    <option value="created">По созданию</option>
+                    <option value="modified">По изменению</option>
+                  </select>
+                  <Icon name="chevron-down" size={12} />
+                </span>
+              </label>
+            </section>
+            <section class="setting-group">
+              <div class="group-heading"><h3>Подсветка</h3><p>Настройте интенсивность и цвета фрагментов.</p></div>
+              <label class="setting-row">
+                <span class="setting-copy"><span class="setting-title">Интенсивность подсветки</span></span>
+                <span class="range-control">
+                  <input type="range" min="0.05" max="0.6" step="0.01" bind:value={settings.annotations.highlightAlpha} oninput={applyTheme} aria-label="Интенсивность подсветки" />
+                  <output>{Math.round(settings.annotations.highlightAlpha * 100)}%</output>
+                </span>
+              </label>
+              <label class="setting-row switch-row">
+                <span class="setting-copy"><span class="setting-title">Различать цвета по типу</span><span class="setting-hint">У каждого типа заметки будет свой маркер.</span></span>
+                <input type="checkbox" role="switch" class="switch-input" aria-label="Различать цвета по типу" bind:checked={settings.annotations.colorByType} onchange={applyTheme} />
+              </label>
+              <label class="setting-row">
+                <span class="setting-copy"><span class="setting-title">Единый цвет подсветки</span><span class="setting-hint">Используется, когда различение по типу выключено.</span></span>
+                <input class="color-input" type="color" disabled={settings.annotations.colorByType} value={settings.annotations.highlightColor ?? themeColor('annot.default')} aria-label="Единый цвет подсветки" oninput={(event) => { settings.annotations.highlightColor = event.currentTarget.value; applyTheme() }} />
+              </label>
+              <div class="color-list">
+                {#each annotationTypes as type (type.id)}
+                  <div class="color-row">
+                    <span class="color-label"><span class="type-dot annot-dot-{type.id}"></span>{type.label}</span>
+                    <span class="color-controls">
+                      <input class="color-input" type="color" disabled={!settings.annotations.colorByType} value={settings.annotations.types.find((item) => item.id === type.id)?.color ?? themeColor(`annot.${type.id}`)} aria-label={`Цвет типа ${type.label}`} oninput={(event) => setAnnotationTypeColor(type.id, event.currentTarget.value)} />
+                      <button class="mini-button" disabled={!settings.annotations.types.find((item) => item.id === type.id)?.color} onclick={() => setAnnotationTypeColor(type.id, null)}>Сбросить</button>
+                    </span>
+                  </div>
+                {/each}
+              </div>
+            </section>
+          {/if}
+
+          {#if settingsSection === 'colors'}
+            <section class="setting-group">
+              <div class="group-heading">
+                <h3>Палитра темы</h3>
+                <p>Отдельные цвета можно переопределить поверх выбранной темы. Сброс возвращает исходное значение.</p>
+              </div>
+              <div class="color-list">
+                {#each ['ui.bg', 'ui.fg', 'ui.fgMuted', 'ui.accent', 'ui.border', 'editor.bg', 'editor.fg', 'editor.selection', 'annot.default', 'annot.comment', 'annot.note', 'annot.question', 'annot.idea', 'annot.todo', 'annot.important'] as colorKey (colorKey)}
+                  <div class="color-row">
+                    <span class="color-label">{colorLabels[colorKey] ?? colorKey}</span>
+                    <span class="color-controls">
+                      <input class="color-input" type="color" value={settings.colorOverrides[colorKey] ?? themeColor(colorKey)} aria-label={`Цвет ${colorKey}`} oninput={(event) => setThemeColor(colorKey, event.currentTarget.value)} />
+                      <button class="mini-button" disabled={!settings.colorOverrides[colorKey]} onclick={() => {
+                        const overrides = { ...settings.colorOverrides }
+                        delete overrides[colorKey]
+                        settings.colorOverrides = overrides
+                        applyTheme()
+                      }}>Сбросить</button>
+                    </span>
+                  </div>
+                {/each}
+              </div>
+            </section>
+          {/if}
+
+          {#if settingsSection === 'files'}
+            <section class="setting-group">
+              <div class="group-heading"><h3>Автосохранение</h3><p>Заметки сохраняются вместе с документом.</p></div>
+              <label class="setting-row switch-row">
+                <span class="setting-copy"><span class="setting-title">Автосохранение аннотаций</span><span class="setting-hint">Сохранять аннотированные документы автоматически.</span></span>
+                <input type="checkbox" role="switch" class="switch-input" aria-label="Автосохранение аннотаций" bind:checked={settings.files.autosave} />
+              </label>
+              <label class="setting-row switch-row">
+                <span class="setting-copy"><span class="setting-title">Автосохранение обычных файлов</span><span class="setting-hint">Работает и для документов без заметок.</span></span>
+                <input type="checkbox" role="switch" class="switch-input" aria-label="Автосохранение обычных файлов" bind:checked={settings.files.autosavePlain} />
+              </label>
+              <label class="setting-row">
+                <span class="setting-copy"><span class="setting-title">Задержка автосохранения</span></span>
+                <span class="number-wrap"><input type="number" min="250" max="10000" step="250" bind:value={settings.files.autosaveDelayMs} aria-label="Задержка автосохранения" /><span>мс</span></span>
+              </label>
+              <label class="setting-row">
+                <span class="setting-copy"><span class="setting-title">Максимум до автосохранения</span></span>
+                <span class="number-wrap"><input type="number" min="1000" max="120000" step="1000" bind:value={settings.files.autosaveMaxWaitMs} aria-label="Максимум до автосохранения" /><span>мс</span></span>
+              </label>
+              <label class="setting-row">
+                <span class="setting-copy"><span class="setting-title">Интервал резервирования</span></span>
+                <span class="number-wrap"><input type="number" min="1" max="1440" bind:value={settings.files.backupIntervalMin} aria-label="Интервал резервирования" /><span>мин</span></span>
+              </label>
+            </section>
+            <section class="setting-group">
+              <div class="group-heading"><h3>Новые документы</h3><p>Формат заметок, кодировка и переводы строк.</p></div>
+              <label class="setting-row">
+                <span class="setting-copy"><span class="setting-title">Формат новых sidecar</span></span>
+                <span class="select-wrap">
+                  <select bind:value={settings.files.saveFormat} aria-label="Формат новых sidecar">
+                    <option value="json">JSON</option>
+                    <option value="md">Markdown</option>
+                  </select>
+                  <Icon name="chevron-down" size={12} />
+                </span>
+              </label>
+              <label class="setting-row">
+                <span class="setting-copy"><span class="setting-title">Кодировка</span></span>
+                <span class="select-wrap">
+                  <select bind:value={settings.files.encoding} aria-label="Кодировка новых документов">
+                    {#each supportedEncodings as supportedEncoding}<option value={supportedEncoding}>{supportedEncoding.toUpperCase()}</option>{/each}
+                  </select>
+                  <Icon name="chevron-down" size={12} />
+                </span>
+              </label>
+              <label class="setting-row">
+                <span class="setting-copy"><span class="setting-title">Перевод строки</span></span>
+                <span class="select-wrap">
+                  <select bind:value={settings.files.defaultEol} aria-label="Перевод строки новых документов">
+                    <option value="lf">LF</option>
+                    <option value="crlf">CRLF</option>
+                  </select>
+                  <Icon name="chevron-down" size={12} />
+                </span>
+              </label>
+            </section>
+            <section class="setting-group">
+              <div class="group-heading"><h3>Сглаживание текста</h3><p>Изменение вступит в силу после перезапуска приложения.</p></div>
+              <label class="setting-row">
+                <span class="setting-copy"><span class="setting-title">Сглаживание</span><span class="setting-hint">Системное сохраняет привычную чёткость Windows.</span></span>
+                <span class="select-wrap">
+                  <select bind:value={settings.rendering.smoothing} aria-label="Сглаживание текста">
+                    <option value="system">Системное</option>
+                    <option value="grayscale">Оттенки серого</option>
+                  </select>
+                  <Icon name="chevron-down" size={12} />
+                </span>
+              </label>
+              <div class="inline-actions">
+                <button class="button" onclick={() => void invoke('settings:openFile').catch((error: unknown) => status = `Не удалось открыть settings.json: ${error instanceof Error ? error.message : String(error)}`)}>
+                  <Icon name="file-text" size={15} /><span>Открыть settings.json</span>
+                </button>
+                <button class="button" onclick={() => void invoke('app:relaunch').catch((error: unknown) => status = `Не удалось перезапустить: ${error instanceof Error ? error.message : String(error)}`)}>
+                  <Icon name="arrow-up-right" size={15} /><span>Перезапустить</span>
+                </button>
+              </div>
+            </section>
+          {/if}
+
+          {#if settingsSection === 'shortcuts'}
+            <section class="setting-group">
+              <div class="group-heading">
+                <h3>Команды</h3>
+                <p>Введите сочетание в поле, например Ctrl+Shift+A. Пустое поле использует значение по умолчанию.</p>
+              </div>
+              {#each shortcutConflicts() as conflict}<p class="settings-error"><Icon name="alert" size={12} />{conflict}</p>{/each}
+              {#each shortcutGroups as group (group.title)}
+                <div class="shortcut-group">
+                  <h4>{group.title}</h4>
+                  {#each group.ids as id (id)}
+                    {@const command = commandDefinitions.find((item) => item.id === id)}
+                    {#if command}
+                      <div class="shortcut-setting">
+                        <span class="shortcut-label" title={command.id}>{command.label}</span>
+                        <input
+                          aria-label={`Сочетание: ${command.label}`}
+                          value={settings.keybindings[command.id] ?? ''}
+                          placeholder={command.shortcut ?? 'Нет'}
+                          oninput={(event) => settings.keybindings = { ...settings.keybindings, [command.id]: event.currentTarget.value || null }}
+                        />
+                        <button class="icon-button compact" aria-label={`Сбросить сочетание: ${command.label}`} title="Сбросить" onclick={() => {
+                          const bindings = { ...settings.keybindings }
+                          delete bindings[command.id]
+                          settings.keybindings = bindings
+                        }}>
+                          <Icon name="x" size={13} />
+                        </button>
+                      </div>
+                    {/if}
+                  {/each}
+                </div>
+              {/each}
+            </section>
+          {/if}
+        </div>
+
+        <footer class="settings-footer">
+          <button class="button" onclick={closeSettings}>Отмена</button>
+          <button class="button primary" onclick={() => void saveSettings()}>Сохранить настройки</button>
+        </footer>
+      </div>
+    </dialog>
+  </div>
+{/if}
+
 {#if commandPaletteOpen}
-  <div class="modal-backdrop command-backdrop" role="presentation" onclick={(event) => { if (event.target === event.currentTarget) commandPaletteOpen = false }}>
+  <div class="modal-backdrop palette-backdrop" role="presentation" onclick={(event) => { if (event.target === event.currentTarget) commandPaletteOpen = false }}>
     <dialog open class="command-palette" aria-label="Панель команд" aria-modal="true" use:modalDialog>
-      <input
-        bind:this={commandPaletteInput}
-        bind:value={commandPaletteQuery}
-        aria-label="Поиск команд"
-        placeholder="Введите название команды…"
-        onkeydown={(event) => {
-          if (event.key === 'Enter' && visibleCommands[0]) {
-            event.preventDefault()
-            void executeCommand(visibleCommands[0].id)
-          }
-        }}
-      />
-      <div class="command-results" role="listbox">
-        {#each visibleCommands as command (command.id)}
-          <button role="option" aria-selected="false" onclick={() => void executeCommand(command.id)}>
-            <span>{command.label}<small>{command.id}</small></span>
+      <div class="command-input-row">
+        <Icon name="search" size={18} />
+        <input
+          bind:this={commandPaletteInput}
+          bind:value={commandPaletteQuery}
+          aria-label="Поиск команд"
+          placeholder="Введите название команды…"
+          role="combobox"
+          aria-expanded="true"
+          aria-controls="command-results"
+          aria-autocomplete="list"
+          aria-activedescendant={activeCommand ? `command-option-${activeCommand.id}` : undefined}
+          oninput={(event) => setCommandPaletteQuery(event.currentTarget.value)}
+          onkeydown={(event) => {
+            if (event.key === 'ArrowDown') { event.preventDefault(); void moveCommandPaletteSelection(1) }
+            else if (event.key === 'ArrowUp') { event.preventDefault(); void moveCommandPaletteSelection(-1) }
+            else if (event.key === 'Enter') {
+              event.preventDefault()
+              if (activeCommand) void executeCommand(activeCommand.id)
+            }
+          }}
+        />
+        <kbd>Esc</kbd>
+      </div>
+      <div class="command-results" id="command-results" role="listbox" aria-label="Команды" bind:this={commandPaletteResults}>
+        {#each visibleCommands as command, index (command.id)}
+          <button
+            id={`command-option-${command.id}`}
+            class:active={index === commandPaletteIndex}
+            role="option"
+            aria-selected={index === commandPaletteIndex}
+            data-command-index={index}
+            onmouseenter={() => commandPaletteIndex = index}
+            onclick={() => void executeCommand(command.id)}
+          >
+            <span class="command-copy">
+              <span class="command-label">{command.label}</span>
+              <span class="command-id">{command.id}</span>
+            </span>
             <kbd>{bindingFor(command) ?? '—'}</kbd>
           </button>
         {:else}
-          <p class="settings-hint">Команды не найдены.</p>
+          <div class="command-empty">
+            <Icon name="search" size={22} />
+            <p>Ничего не найдено</p>
+            <span>Попробуйте другое название команды.</span>
+          </div>
         {/each}
       </div>
+      <footer class="command-footer">
+        <span><kbd>↑</kbd><kbd>↓</kbd> выбор</span>
+        <span><kbd>Enter</kbd> выполнить</span>
+        <span><kbd>Esc</kbd> закрыть</span>
+      </footer>
     </dialog>
   </div>
 {/if}
 
 {#if themePickerOpen}
-  <div class="modal-backdrop">
-    <dialog open class="command-palette" aria-label="Выбор темы" aria-modal="true" use:modalDialog>
-      <h2>Сменить тему</h2>
-      <div class="command-results" role="listbox">
-        {#each [...Object.keys(themes), ...availableUserThemes.map((theme) => theme.id)] as themeId (themeId)}
-          {@const userTheme = availableUserThemes.find((theme) => theme.id === themeId)}
-          <button role="option" aria-selected={settings.theme === themeId} onclick={() => {
-            settings.theme = themeId
-            themePickerOpen = false
-            applyTheme()
-            void saveSettings(false)
-          }}>
-            <span>{userTheme?.name ?? themeId}</span>
-            <kbd>{settings.theme === themeId ? 'Выбрана' : userTheme ? 'Пользовательская' : 'Встроенная'}</kbd>
-          </button>
-        {/each}
-      </div>
-      <button onclick={() => themePickerOpen = false}>Закрыть</button>
+  <div class="modal-backdrop palette-backdrop">
+    <dialog open class="picker-dialog" aria-labelledby="theme-picker-title" aria-modal="true" use:modalDialog>
+      <header class="dialog-header">
+        <div class="dialog-heading">
+          <h2 id="theme-picker-title">Выбрать тему</h2>
+          <p>Оформление применяется сразу.</p>
+        </div>
+        <button class="icon-button" aria-label="Закрыть выбор темы" onclick={() => themePickerOpen = false}>
+          <Icon name="x" size={16} />
+        </button>
+      </header>
+      {@render ThemeGallery()}
+      {#if settings.themeFollowSystem.enabled}
+        <p class="inline-note"><Icon name="info" size={13} />Включено следование теме Windows. Выбор вступит в силу, если его отключить.</p>
+      {/if}
+      <footer class="dialog-footer">
+        <button class="button" onclick={() => themePickerOpen = false}>Закрыть</button>
+      </footer>
     </dialog>
   </div>
 {/if}
 
 {#if treeEdit}
-<div class="modal-backdrop">
-  <dialog open class="close-dialog tree-edit-dialog" aria-modal="true" aria-labelledby="tree-edit-title" use:modalDialog>
-    <h2 id="tree-edit-title">{treeEdit.action === 'rename' ? 'Переименовать' : treeEdit.action === 'create-folder' ? 'Создать папку' : 'Создать текстовый файл'}</h2>
-    <form onsubmit={(event) => { event.preventDefault(); void commitTreeEdit() }}>
-      <label class="tree-edit-field">
-        <span>Имя</span>
-        <input bind:this={treeNameInput} bind:value={treeEdit.name} maxlength="259" required aria-label="Имя файла или папки" />
-      </label>
-      <div class="close-dialog-actions">
-        <button type="button" onclick={() => treeEdit = null}>Отмена</button>
-        <button class="accent-button" type="submit">{treeEdit.action === 'rename' ? 'Переименовать' : 'Создать'}</button>
+  <div class="modal-backdrop">
+    <dialog open class="dialog tree-edit-dialog" aria-modal="true" aria-labelledby="tree-edit-title" use:modalDialog>
+      <div class="dialog-header">
+        <div class="dialog-heading">
+          <h2 id="tree-edit-title">{treeEdit.action === 'rename' ? 'Переименовать' : treeEdit.action === 'create-folder' ? 'Создать папку' : 'Создать текстовый файл'}</h2>
+          <p>{treeEdit.action === 'rename' ? 'Введите новое имя элемента.' : 'Элемент появится внутри выбранной папки.'}</p>
+        </div>
+        <button class="icon-button" aria-label="Закрыть" onclick={() => treeEdit = null}>
+          <Icon name="x" size={16} />
+        </button>
       </div>
-    </form>
-  </dialog>
-</div>
+      <form onsubmit={(event) => { event.preventDefault(); void commitTreeEdit() }}>
+        <label class="tree-edit-field">
+          <span>Имя</span>
+          <input bind:this={treeNameInput} bind:value={treeEdit.name} maxlength="259" required aria-label="Имя файла или папки" />
+        </label>
+        <footer class="dialog-footer">
+          <button class="button" type="button" onclick={() => treeEdit = null}>Отмена</button>
+          <button class="button primary" type="submit">{treeEdit.action === 'rename' ? 'Переименовать' : 'Создать'}</button>
+        </footer>
+      </form>
+    </dialog>
+  </div>
 {/if}
 
 {#if closeTabId}
   {@const closingTab = tabs.find((tab) => tab.id === closeTabId)}
   <div class="modal-backdrop">
-    <dialog open class="close-dialog" aria-modal="true" aria-labelledby="close-dialog-title" use:modalDialog>
-      <h2 id="close-dialog-title">Сохранить изменения?</h2>
-      <p>Документ «{closingTab?.path?.split(/[\\/]/).at(-1) ?? 'Новый документ'}» содержит несохранённые изменения.</p>
-      <div class="close-dialog-actions">
-        <button class="accent-button" onclick={() => void closeTabChoice('save')}>Сохранить</button>
-        <button onclick={() => void closeTabChoice('discard')}>Не сохранять</button>
-        <button onclick={() => void closeTabChoice('cancel')}>Отмена</button>
+    <dialog open class="dialog confirm-dialog" aria-modal="true" aria-labelledby="close-dialog-title" use:modalDialog>
+      <div class="confirm-body">
+        <span class="confirm-icon"><Icon name="save" size={18} /></span>
+        <div class="dialog-heading">
+          <h2 id="close-dialog-title">Сохранить изменения?</h2>
+          <p>Документ «{closingTab?.path?.split(/[\\/]/).at(-1) ?? 'Новый документ'}» содержит несохранённые изменения.</p>
+        </div>
       </div>
+      <footer class="dialog-footer">
+        <button class="button" onclick={() => void closeTabChoice('cancel')}>Отмена</button>
+        <button class="button danger-ghost" onclick={() => void closeTabChoice('discard')}>Не сохранять</button>
+        <button class="button primary" onclick={() => void closeTabChoice('save')}>Сохранить</button>
+      </footer>
     </dialog>
   </div>
 {/if}
+
+{#if confirmRequest}
+  <div class="modal-backdrop">
+    <dialog open class="dialog confirm-dialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-message" use:modalDialog>
+      <div class="confirm-body">
+        <span class:danger={confirmRequest.danger} class="confirm-icon"><Icon name={confirmRequest.danger ? 'alert' : 'info'} size={18} /></span>
+        <div class="dialog-heading">
+          <h2 id="confirm-title">{confirmRequest.title}</h2>
+          <p id="confirm-message">{confirmRequest.message}</p>
+        </div>
+      </div>
+      <footer class="dialog-footer">
+        {#if confirmRequest.tertiaryLabel}
+          <button class="button" onclick={() => answerConfirm('tertiary')}>{confirmRequest.tertiaryLabel}</button>
+        {/if}
+        <span class="dialog-spacer"></span>
+        <button class="button" onclick={() => answerConfirm('cancel')}>{confirmRequest.cancelLabel ?? 'Отмена'}</button>
+        <button class="button" class:danger={confirmRequest.danger} class:primary={!confirmRequest.danger} onclick={() => answerConfirm('confirm')}>{confirmRequest.confirmLabel}</button>
+      </footer>
+    </dialog>
+  </div>
+{/if}
+
+{#snippet ThemeGallery()}
+  <div class="theme-gallery">
+    {#each themeOptions as option (option.id)}
+      <button class="theme-card" class:active={settings.theme === option.id} aria-pressed={settings.theme === option.id} onclick={() => selectTheme(option.id)}>
+        <span class="theme-preview" style="background: {option.colors['editor.bg']}">
+          <span class="theme-preview-side" style="background: {option.colors['ui.bg']}"></span>
+          <span class="theme-preview-page">
+            <span class="theme-preview-line" style="background: color-mix(in srgb, {option.colors['editor.fg']} 62%, transparent); width: 62%"></span>
+            <span class="theme-preview-line" style="background: color-mix(in srgb, {option.colors['editor.fg']} 34%, transparent); width: 82%"></span>
+            <span class="theme-preview-line" style="background: color-mix(in srgb, {option.colors['editor.fg']} 34%, transparent); width: 70%"></span>
+            <span class="theme-preview-highlight" style="background: {option.colors['annot.comment']}"></span>
+            <span class="theme-preview-line" style="background: color-mix(in srgb, {option.colors['editor.fg']} 34%, transparent); width: 76%"></span>
+          </span>
+          <span class="theme-preview-swatches">
+            {#each themeSwatchKeys as key}<span class="theme-swatch" style="background: {option.colors[key]}"></span>{/each}
+          </span>
+        </span>
+        <span class="theme-meta">
+          <span class="theme-name">{option.name}</span>
+          <span class="theme-kind">{option.user ? 'Своя тема' : option.kind === 'dark' ? 'Тёмная' : 'Светлая'}</span>
+        </span>
+      </button>
+    {/each}
+  </div>
+{/snippet}
 
 {#snippet TreeEntry(entry: FileEntry, depth: number, expanded: Set<string>, children: Record<string, FileEntry[]>, toggleDirectory: (entry: FileEntry) => void, openFile: (path: string) => void)}
   <div
@@ -2662,11 +3576,18 @@
     ondrop={(event) => void dropOnTree(event)}
     ondragend={() => { draggedEntryPaths = []; clearDropTarget() }}
   >
-    <span class="tree-chevron">{entry.kind === 'directory' ? expanded.has(entry.path) ? '▾' : '▸' : ''}</span>
-    <span class="tree-icon">{entry.kind === 'directory' ? expanded.has(entry.path) ? '▾' : '▸' : entry.name.toLowerCase().endsWith('.md') ? '¶' : '≡'}</span>
+    <span class="tree-chevron">
+      {#if entry.kind === 'directory'}<Icon name={expanded.has(entry.path) ? 'chevron-down' : 'chevron-right'} size={13} />{/if}
+    </span>
+    <span class="tree-icon">
+      {#if entry.kind === 'directory'}<Icon name={expanded.has(entry.path) ? 'folder-open' : 'folder'} size={15} />{:else}<Icon name="file-text" size={14} />{/if}
+    </span>
     <span class="tree-name">{entry.name.replace(/\.annot\.(json|md)$/i, '')}</span>
-    {#if entry.annotationConflict}<span class="tree-conflict" title="Найдены оба формата sidecar-аннотаций">⚠</span>
-    {:else if entry.annotated}<span class="tree-annotated" title="Есть аннотации">✳</span>{/if}
+    {#if entry.annotationConflict}
+      <span class="tree-conflict" title="Найдены оба формата sidecar-аннотаций"><Icon name="alert" size={12} /></span>
+    {:else if entry.annotated}
+      <span class="tree-annotated" title="Есть аннотации"><Icon name="spark" size={12} /></span>
+    {/if}
   </div>
   {#if entry.kind === 'directory' && expanded.has(entry.path)}
     {#each children[entry.path] ?? [] as child (child.path)}

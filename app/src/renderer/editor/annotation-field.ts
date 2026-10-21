@@ -36,8 +36,8 @@ class FocusGapWidget extends WidgetType {
 
   toDOM(): HTMLElement {
     const gap = document.createElement('span')
-    gap.className = 'cm-focus-gap'
-    gap.textContent = this.separator === 'ellipsis' ? '…' : this.separator === 'blank1' ? '\n' : '\n\n'
+    gap.className = `cm-focus-gap cm-focus-gap-${this.separator}`
+    gap.textContent = this.separator === 'ellipsis' ? '…' : ''
     return gap
   }
 }
