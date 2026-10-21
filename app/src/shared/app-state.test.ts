@@ -9,6 +9,13 @@ describe('application state', () => {
       openTabs: [],
       activeTab: 0,
       lastWorkspace: null,
+      layout: {
+        explorerWidth: 250,
+        annotationsWidth: 340,
+        showExplorer: true,
+        showAnnotations: true,
+        showOutline: true,
+      },
     })
     expect(appStateSchema.parse({
       folders: ['C:\\texts'],
@@ -16,6 +23,30 @@ describe('application state', () => {
       activeTab: 0,
       lastWorkspace: 'C:\\texts\\library.annotator-workspace',
     })).toMatchObject({ folders: ['C:\\texts'], activeTab: 0 })
+  })
+
+  it('restores valid panel layout and repairs invalid layout without losing workspace state', () => {
+    expect(appStateSchema.parse({
+      folders: ['C:\\texts'],
+      layout: {
+        explorerWidth: 320,
+        annotationsWidth: 400,
+        showExplorer: false,
+        showAnnotations: true,
+        showOutline: false,
+      },
+    })).toMatchObject({
+      folders: ['C:\\texts'],
+      layout: { explorerWidth: 320, annotationsWidth: 400, showExplorer: false, showAnnotations: true, showOutline: false },
+    })
+
+    expect(appStateSchema.parse({
+      folders: ['C:\\texts'],
+      layout: { explorerWidth: 900, annotationsWidth: -1, showExplorer: 'no' },
+    })).toMatchObject({
+      folders: ['C:\\texts'],
+      layout: { explorerWidth: 250, annotationsWidth: 340, showExplorer: true, showAnnotations: true, showOutline: true },
+    })
   })
 
   it('rejects unsupported state versions and invalid active tab indices', () => {

@@ -15,7 +15,7 @@
   import { createLineStarts, createOutlineRows } from './editor/outline'
   import { parseTags } from './editor/annotation-tags'
   import { createAnnotatedDocument, parseAnnotatedDocument, restoreAnnotations, toPlainAnnotatedDocument } from './format/json-format'
-  import { parseShortcut, resolveTheme, settingsSchema, themes, type AppSettings, type UserTheme } from '../shared/settings'
+  import { getAnnotationMarkerColor, parseShortcut, resolveTheme, settingsSchema, themes, type AppSettings, type UserTheme } from '../shared/settings'
 
   interface DocumentTab {
     id: string
@@ -44,6 +44,11 @@
       const state = result.state
       folders = state.folders
       lastWorkspaceFile = state.lastWorkspace
+      explorerWidth = state.layout.explorerWidth
+      annotationWidth = state.layout.annotationsWidth
+      showExplorer = state.layout.showExplorer
+      showAnnotations = state.layout.showAnnotations
+      showOutline = state.layout.showOutline
       if (folders.length) await refreshWorkspace()
       const restoredTabs = new Map<number, string>()
       for (const [index, tabPath] of state.openTabs.entries()) {
@@ -135,6 +140,11 @@
   const focusCompartment = new Compartment()
   const editorLayoutCompartment = new Compartment()
   let showExplorer = $state(true)
+  let explorerWidth = $state(250)
+  let annotationWidth = $state(340)
+  let explorerRenderedWidth = $state(250)
+  let annotationsRenderedWidth = $state(340)
+  let paneResize: { side: 'explorer' | 'annotations'; startX: number; startWidth: number } | null = null
   let showOutline = $state(true)
   let outlineListHost = $state<HTMLDivElement>()
   let outlineScrollTop = $state(0)
@@ -161,6 +171,99 @@
   let editNoteId = $state<string | null>(null)
   let revision = $state(0)
   let lastRecoveryDigest = ''
+
+  function startPaneResize(side: 'explorer' | 'annotations', event: PointerEvent): void {
+    if (event.button !== 0) return
+    paneResize = { side, startX: event.clientX, startWidth: side === 'explorer' ? explorerWidth : annotationWidth }
+    ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
+    event.preventDefault()
+  }
+
+  function movePaneResize(event: PointerEvent): void {
+    if (!paneResize) return
+    const delta = event.clientX - paneResize.startX
+    if (paneResize.side === 'explorer') explorerWidth = Math.max(190, Math.min(380, paneResize.startWidth + delta))
+    else annotationWidth = Math.max(270, Math.min(460, paneResize.startWidth - delta))
+  }
+
+  function finishPaneResize(): void { paneResize = null }
+
+  function resizePaneWithKeyboard(side: 'explorer' | 'annotations', event: KeyboardEvent): void {
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+    event.preventDefault()
+    const delta = event.key === 'ArrowRight' ? 16 : -16
+    if (side === 'explorer') explorerWidth = Math.max(190, Math.min(380, explorerWidth + delta))
+    else annotationWidth = Math.max(270, Math.min(460, annotationWidth - delta))
+  }
+
+  function resizablePane(node: HTMLElement, side: 'explorer' | 'annotations') {
+    const pointerDown = (event: PointerEvent) => startPaneResize(side, event)
+    const pointerMove = (event: PointerEvent) => movePaneResize(event)
+    const pointerUp = () => finishPaneResize()
+    const keyDown = (event: KeyboardEvent) => resizePaneWithKeyboard(side, event)
+    node.addEventListener('pointerdown', pointerDown)
+    node.addEventListener('pointermove', pointerMove)
+    node.addEventListener('pointerup', pointerUp)
+    node.addEventListener('pointercancel', pointerUp)
+    node.addEventListener('keydown', keyDown)
+    return {
+      destroy() {
+        node.removeEventListener('pointerdown', pointerDown)
+        node.removeEventListener('pointermove', pointerMove)
+        node.removeEventListener('pointerup', pointerUp)
+        node.removeEventListener('pointercancel', pointerUp)
+        node.removeEventListener('keydown', keyDown)
+      },
+    }
+  }
+
+  function measurePaneWidth(node: HTMLElement, side: 'explorer' | 'annotations') {
+    const update = () => {
+      const width = Math.round(node.getBoundingClientRect().width)
+      if (width > 0) {
+        if (side === 'explorer') explorerRenderedWidth = width
+        else annotationsRenderedWidth = width
+      }
+    }
+    const observer = new ResizeObserver(update)
+    observer.observe(node)
+    update()
+    return { destroy: () => observer.disconnect() }
+  }
+
+  function modalDialog(node: HTMLDialogElement) {
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const focusable = () => [...node.querySelectorAll<HTMLElement>(
+      'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), a[href], [tabindex]:not([tabindex="-1"])',
+    )].filter((element) => element.getClientRects().length > 0)
+    const firstFrame = requestAnimationFrame(() => (focusable()[0] ?? node).focus())
+    const onKeydown = (event: KeyboardEvent) => {
+      if (event.key !== 'Tab') return
+      const items = focusable()
+      if (!items.length) {
+        event.preventDefault()
+        node.focus()
+        return
+      }
+      const first = items[0]!
+      const last = items.at(-1)!
+      if (event.shiftKey && (document.activeElement === first || !node.contains(document.activeElement))) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && (document.activeElement === last || !node.contains(document.activeElement))) {
+        event.preventDefault()
+        first.focus()
+      }
+    }
+    node.addEventListener('keydown', onKeydown)
+    return {
+      destroy() {
+        cancelAnimationFrame(firstFrame)
+        node.removeEventListener('keydown', onKeydown)
+        if (previousFocus?.isConnected) previousFocus.focus()
+      },
+    }
+  }
 
   const annotationTypes = [
     { id: 'comment', label: 'Комментарий' },
@@ -276,12 +379,14 @@
     const root = document.documentElement
     const variableNames: Record<string, string> = {
       'ui.bg': '--ui-bg',
+      'ui.bgAlt': '--ui-bg-alt',
       'ui.fg': '--ui-fg',
       'ui.fgMuted': '--fg-muted',
       'ui.border': '--border',
       'ui.accent': '--accent',
       'ui.accentFg': '--accent-fg',
       'ui.hover': '--hover',
+      'ui.selectedRow': '--selected-row',
       'ui.danger': '--danger',
       'editor.bg': '--editor-bg',
       'editor.fg': '--editor-fg',
@@ -306,6 +411,13 @@
           : settings.annotations.highlightColor ?? palette.colors['annot.default']!
         : palette.colors[key]!
       root.style.setProperty(variable, color)
+      if (typeId && typeId !== 'default') {
+        const markerPalette = {
+          ...palette,
+          colors: { ...palette.colors, [key]: color },
+        }
+        root.style.setProperty(`--annot-dot-${typeId}`, getAnnotationMarkerColor(markerPalette, typeId))
+      }
     }
     root.style.setProperty('--annot-alpha', `${settings.annotations.highlightAlpha * 100}%`)
     root.style.setProperty('--editor-font-family', settings.editor.fontFamily)
@@ -314,7 +426,7 @@
     root.style.setProperty('--editor-line-height', String(settings.editor.lineHeight))
     root.style.setProperty('--editor-max-width', `${settings.editor.maxLineWidthCh}ch`)
     root.style.setProperty('--editor-ligatures', settings.editor.ligatures ? 'normal' : 'none')
-    root.style.setProperty('--card-bg', palette.colors['ui.bg']!)
+    root.style.setProperty('--card-bg', palette.colors['ui.bgAlt']!)
     root.style.setProperty('--ui-font-family', settings.ui.fontFamily)
     root.style.setProperty('--ui-font-size', `${settings.ui.fontSize}px`)
     root.style.setProperty('--annotations-font-family', settings.annotationsPanel.fontFamily)
@@ -421,7 +533,9 @@
       case 'annotation.create': await createAnnotation(); break
       case 'annotation.confirm': confirmAnnotation(); break
       case 'ui.cancel':
-        if (treeEdit) treeEdit = null
+        if (showSettings) { showSettings = false; void loadSettings() }
+        else if (closeTabId) closeTabId = null
+        else if (treeEdit) treeEdit = null
         else if (treeMenu) treeMenu = false
         else if (themePickerOpen) themePickerOpen = false
         else if (pendingSelection.from !== pendingSelection.to) {
@@ -621,7 +735,7 @@
       }
       if ((command.id.startsWith('explorer.') || command.id === 'edit.undo') && !inTree) continue
       if (command.id === 'annotation.confirm' && !(event.target instanceof HTMLTextAreaElement)) continue
-      if (command.id === 'ui.cancel' && !commandPaletteOpen && !themePickerOpen && !treeMenu && !treeEdit && pendingSelection.from === pendingSelection.to) continue
+      if (command.id === 'ui.cancel' && !commandPaletteOpen && !themePickerOpen && !showSettings && !closeTabId && !treeMenu && !treeEdit && pendingSelection.from === pendingSelection.to) continue
       event.preventDefault()
       void executeCommand(command.id).catch((error: unknown) => {
         status = `Команда не выполнена: ${error instanceof Error ? error.message : String(error)}`
@@ -1952,6 +2066,7 @@
       openTabs: openDocumentTabs.flatMap((tab) => tab.path ? [tab.path] : []),
       activeTab,
       lastWorkspace: lastWorkspaceFile,
+      layout: { explorerWidth, annotationsWidth: annotationWidth, showExplorer, showAnnotations, showOutline },
     }
     if (appStateTimer) clearTimeout(appStateTimer)
     appStateTimer = setTimeout(() => {
@@ -1983,12 +2098,12 @@
     </div>
     <div class="toolbar-spacer"></div>
     <button class:active={focusMode} onclick={() => setFocusMode(!focusMode)} title="Режим фокуса (F9)">Фокус</button>
-    <button onclick={() => { void loadSettings(); showSettings = true }} title="Настройки приложения">⚙</button>
+    <button aria-label="Настройки приложения" onclick={() => { void loadSettings(); showSettings = true }} title="Настройки приложения">⚙</button>
   </header>
 
   <div class="workspace">
     {#if showExplorer && !focusMode}
-      <aside class="explorer pane">
+      <aside class="explorer pane" style:width="{explorerWidth}px" style:flex-basis="{explorerWidth}px" use:measurePaneWidth={'explorer'}>
         <div class="pane-heading"><span>ПРОВОДНИК</span><div class="explorer-actions"><button class="icon-button" aria-expanded={treeMenu} onclick={toggleTreeMenu} title="Операции с файлами">⋯</button><button class="icon-button" onclick={() => void openFolder(true)} title="Добавить папку">＋</button></div></div>
         {#if treeMenu && folders.length}
           <div class="tree-context-menu" role="menu" aria-label="Операции с файлами">
@@ -2022,13 +2137,22 @@
 
         {#if showSettings}
           <div class="modal-backdrop">
-            <dialog open class="settings-dialog" aria-labelledby="settings-title">
+            <dialog open class="settings-dialog" aria-modal="true" aria-labelledby="settings-title" use:modalDialog>
               <div class="settings-title-row">
                 <h2 id="settings-title">Настройки Annotator</h2>
                 <button aria-label="Закрыть настройки" onclick={() => { showSettings = false; void loadSettings() }}>×</button>
               </div>
               <div class="settings-scroll">
-                <section class="settings-section">
+                <nav class="settings-nav" aria-label="Разделы настроек">
+                  <button onclick={() => document.getElementById('settings-appearance')?.scrollIntoView({ block: 'start', behavior: 'smooth' })}>Внешний вид</button>
+                  <button onclick={() => document.getElementById('settings-typography')?.scrollIntoView({ block: 'start', behavior: 'smooth' })}>Шрифты</button>
+                  <button onclick={() => document.getElementById('settings-editor')?.scrollIntoView({ block: 'start', behavior: 'smooth' })}>Отображение</button>
+                  <button onclick={() => document.getElementById('settings-annotations')?.scrollIntoView({ block: 'start', behavior: 'smooth' })}>Аннотации</button>
+                  <button onclick={() => document.getElementById('settings-colors')?.scrollIntoView({ block: 'start', behavior: 'smooth' })}>Цвета</button>
+                  <button onclick={() => document.getElementById('settings-files')?.scrollIntoView({ block: 'start', behavior: 'smooth' })}>Файлы</button>
+                  <button onclick={() => document.getElementById('settings-shortcuts')?.scrollIntoView({ block: 'start', behavior: 'smooth' })}>Сочетания клавиш</button>
+                </nav>
+                <section id="settings-appearance" class="settings-section">
                   <h3>Цветовая тема</h3>
                   <label class="settings-field">
                     <span>Тема</span>
@@ -2049,7 +2173,7 @@
                   </div>
                   {#each themeErrors as error (error.file)}<p class="settings-error">{error.file}: {error.message}</p>{/each}
                 </section>
-                <section class="settings-section">
+                <section id="settings-typography" class="settings-section">
                   <h3>Шрифты и масштаб</h3>
                   <label class="settings-field">
                     <span>Шрифт интерфейса</span>
@@ -2094,11 +2218,9 @@
                   </p>
                   <p class="settings-hint">Ctrl+колесо меняет размер текста, Ctrl+0 сбрасывает его. Семейство шрифта можно ввести вручную.</p>
                 </section>
-                <section class="settings-section">
+                <section id="settings-editor" class="settings-section">
                   <h3>Отображение</h3>
                   <label class="settings-field"><span>Масштаб интерфейса: {Math.round(settings.ui.zoom * 100)}%</span><input type="range" min="0.75" max="1.5" step="0.05" bind:value={settings.ui.zoom} oninput={applyTheme} /></label>
-                  <label class="settings-check"><input type="checkbox" bind:checked={settings.annotationsPanel.showQuote} /> Показывать цитату в карточке</label>
-                  <label class="settings-check"><input type="checkbox" bind:checked={settings.annotationsPanel.linkScroll} /> Связывать прокрутку текста и аннотаций</label>
                   <label class="settings-field"><span>Контекст режима фокуса (символы)</span><input type="number" min="0" max="500" bind:value={settings.focusView.contextChars} onchange={() => setFocusMode(focusMode)} /></label>
                   <label class="settings-field"><span>Разделитель Focus view</span><select bind:value={settings.focusView.separator} onchange={() => setFocusMode(focusMode)}><option value="blank1">Одна пустая строка</option><option value="blank2">Две пустые строки</option><option value="ellipsis">Многоточие</option></select></label>
                   <label class="settings-check"><input type="checkbox" bind:checked={settings.editor.lineNumbers} onchange={applyTheme} /> Номера строк</label>
@@ -2106,9 +2228,15 @@
                   <label class="settings-check"><input type="checkbox" bind:checked={settings.editor.wrap} onchange={applyTheme} /> Переносить длинные строки</label>
                   <label class="settings-field"><span>Толщина шрифта редактора</span><select bind:value={settings.editor.fontWeight} onchange={applyTheme}>{#each [300, 400, 500, 600, 700] as weight}<option value={weight}>{weight}</option>{/each}</select></label>
                   <label class="settings-field"><span>Максимальная ширина строки (ch)</span><input type="number" min="40" max="240" bind:value={settings.editor.maxLineWidthCh} oninput={applyTheme} /></label>
+                </section>
+                <section id="settings-annotations" class="settings-section">
+                  <h3>Аннотации и отображение</h3>
+                  <label class="settings-check"><input type="checkbox" bind:checked={settings.annotationsPanel.showQuote} /> Показывать цитату в карточке</label>
+                  <label class="settings-check"><input type="checkbox" bind:checked={settings.annotationsPanel.linkScroll} /> Связывать прокрутку текста и аннотаций</label>
                   <label class="settings-field"><span>Тип новой аннотации</span><select bind:value={settings.annotations.defaultType}>{#each annotationTypes as type}<option value={type.id}>{type.label}</option>{/each}</select></label>
                   <label class="settings-field"><span>Интенсивность подсветки</span><input type="range" min="0.05" max="0.6" step="0.01" bind:value={settings.annotations.highlightAlpha} oninput={applyTheme} /></label>
                   <label class="settings-check"><input type="checkbox" bind:checked={settings.annotations.colorByType} onchange={applyTheme} /> Различать цвета аннотаций по типу</label>
+                  <h3>Цвета типов аннотаций</h3>
                   <label class="settings-field"><span>Единый цвет подсветки</span><input type="color" disabled={settings.annotations.colorByType} value={settings.annotations.highlightColor ?? themeColor('annot.default')} oninput={(event) => { settings.annotations.highlightColor = event.currentTarget.value; applyTheme() }} /></label>
                   {#each annotationTypes as type (type.id)}
                     <label class="color-setting">
@@ -2118,7 +2246,7 @@
                     </label>
                   {/each}
                 </section>
-                <section class="settings-section">
+                <section id="settings-colors" class="settings-section">
                   <h3>Переопределение цветов</h3>
                   {#each ['ui.bg', 'ui.fg', 'ui.fgMuted', 'ui.accent', 'ui.border', 'editor.bg', 'editor.fg', 'editor.selection', 'annot.default', 'annot.comment', 'annot.note', 'annot.question', 'annot.idea', 'annot.todo', 'annot.important'] as colorKey (colorKey)}
                     <label class="color-setting">
@@ -2133,7 +2261,7 @@
                     </label>
                   {/each}
                 </section>
-                <section class="settings-section">
+                <section id="settings-files" class="settings-section">
                   <h3>Файлы и сглаживание</h3>
                   <label class="settings-field"><span>Автосохранение аннотаций</span><input type="checkbox" bind:checked={settings.files.autosave} /></label>
                   <label class="settings-field"><span>Задержка автосохранения (мс)</span><input type="number" min="250" max="10000" step="250" bind:value={settings.files.autosaveDelayMs} /></label>
@@ -2150,7 +2278,7 @@
                     <button onclick={() => void invoke('app:relaunch').catch((error: unknown) => status = `Не удалось перезапустить: ${error instanceof Error ? error.message : String(error)}`)}>Перезапустить</button>
                   </div>
                 </section>
-                <section class="settings-section">
+                <section id="settings-shortcuts" class="settings-section">
                   <h3>Команды и сочетания клавиш</h3>
                   {#each shortcutConflicts() as conflict}<p class="settings-error">Конфликт сочетания: {conflict}</p>{/each}
                   {#each commandDefinitions as command (command.id)}
@@ -2227,6 +2355,8 @@
           {/if}
         </section>
       </aside>
+      <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+      <div class="pane-resizer" role="separator" aria-orientation="vertical" aria-label="Ширина проводника" aria-valuemin="190" aria-valuemax="380" aria-valuenow={explorerRenderedWidth} tabindex="0" use:resizablePane={'explorer'}></div>
     {/if}
 
     <main class="editor-column">
@@ -2252,10 +2382,27 @@
           {/each}
         </div>
         <span class="tab-spacer"></span>
-        <button class="icon-button" title="Переключить проводник" onclick={() => showExplorer = !showExplorer}>◧</button>
-        <button class="icon-button" title="Переключить аннотации" onclick={() => showAnnotations = !showAnnotations}>▤</button>
+        <button class="icon-button" class:active={showExplorer} aria-label="Показать или скрыть проводник" aria-pressed={showExplorer} title="Проводник (Ctrl+B)" onclick={() => showExplorer = !showExplorer}>◧</button>
+        <button class="icon-button" class:active={showAnnotations} aria-label="Показать или скрыть аннотации" aria-pressed={showAnnotations} title="Аннотации (Ctrl+Shift+B)" onclick={() => showAnnotations = !showAnnotations}>▤</button>
       </div>
-      <div class="editor-surface" bind:this={editorHost}></div>
+      <div class="editor-surface">
+        <div class="editor-host" bind:this={editorHost}></div>
+        {#if tabs.length === 0}
+          <section class="welcome-screen" aria-labelledby="welcome-title">
+            <div class="welcome-content">
+              <span class="welcome-mark" aria-hidden="true">A</span>
+              <h1 id="welcome-title">Начните работу с текстом</h1>
+              <p>Откройте документ или папку, чтобы читать текст и добавлять к нему аннотации.</p>
+              <div class="welcome-actions">
+                <button class="accent-button" onclick={() => void openFile()}>Открыть документ</button>
+                <button onclick={() => void openFolder()}>Открыть папку</button>
+                <button onclick={newFile}>Создать документ</button>
+              </div>
+              <p class="welcome-shortcut">Открыть документ <kbd>Ctrl+O</kbd><span aria-hidden="true"> · </span>Новый документ <kbd>Ctrl+N</kbd></p>
+            </div>
+          </section>
+        {/if}
+      </div>
       <footer class="statusbar">
         <span>{dirty ? '● Не сохранено' : '✓ Сохранено'}</span>
         {#if annotationPath && filePath !== annotationPath && originalText !== null && originalText !== text}
@@ -2267,12 +2414,14 @@
         <span>{eol === '\r\n' ? 'CRLF' : eol === '\r' ? 'CR' : 'LF'}</span>
         <span>Стр. {cursorPosition.line}, стлб. {cursorPosition.column}</span>
         <span>{annotations.length} {annotationPluralRules.select(annotations.length) === 'one' ? 'аннотация' : annotationPluralRules.select(annotations.length) === 'few' ? 'аннотации' : 'аннотаций'}</span>
-        <span class="status-message">{status}</span>
+        <span class="status-message" role="status" aria-live="polite">{status}</span>
       </footer>
     </main>
 
     {#if showAnnotations && !focusMode}
-      <aside class="annotations pane">
+      <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+      <div class="pane-resizer" role="separator" aria-orientation="vertical" aria-label="Ширина панели аннотаций" aria-valuemin="270" aria-valuemax="460" aria-valuenow={annotationsRenderedWidth} tabindex="0" use:resizablePane={'annotations'}></div>
+      <aside class="annotations pane" style:width="{annotationWidth}px" style:flex-basis="{annotationWidth}px" use:measurePaneWidth={'annotations'}>
         <div class="pane-heading"><span>АННОТАЦИИ</span><span class="count-badge">{annotations.length}</span></div>
         <input class="search-input" bind:value={query} oninput={() => { annotationScrollTop = 0; if (annotationScrollHost) annotationScrollHost.scrollTop = 0 }} placeholder="Поиск по заметкам и тегам" aria-label="Поиск по аннотациям" />
         <div class="annotation-filters">
@@ -2393,7 +2542,7 @@
 
 {#if commandPaletteOpen}
   <div class="modal-backdrop command-backdrop" role="presentation" onclick={(event) => { if (event.target === event.currentTarget) commandPaletteOpen = false }}>
-    <dialog open class="command-palette" aria-label="Панель команд" aria-modal="true">
+    <dialog open class="command-palette" aria-label="Панель команд" aria-modal="true" use:modalDialog>
       <input
         bind:this={commandPaletteInput}
         bind:value={commandPaletteQuery}
@@ -2422,7 +2571,7 @@
 
 {#if themePickerOpen}
   <div class="modal-backdrop">
-    <dialog open class="command-palette" aria-label="Выбор темы" aria-modal="true">
+    <dialog open class="command-palette" aria-label="Выбор темы" aria-modal="true" use:modalDialog>
       <h2>Сменить тему</h2>
       <div class="command-results" role="listbox">
         {#each [...Object.keys(themes), ...availableUserThemes.map((theme) => theme.id)] as themeId (themeId)}
@@ -2445,7 +2594,7 @@
 
 {#if treeEdit}
 <div class="modal-backdrop">
-  <dialog open class="close-dialog tree-edit-dialog" aria-labelledby="tree-edit-title">
+  <dialog open class="close-dialog tree-edit-dialog" aria-modal="true" aria-labelledby="tree-edit-title" use:modalDialog>
     <h2 id="tree-edit-title">{treeEdit.action === 'rename' ? 'Переименовать' : treeEdit.action === 'create-folder' ? 'Создать папку' : 'Создать текстовый файл'}</h2>
     <form onsubmit={(event) => { event.preventDefault(); void commitTreeEdit() }}>
       <label class="tree-edit-field">
@@ -2464,7 +2613,7 @@
 {#if closeTabId}
   {@const closingTab = tabs.find((tab) => tab.id === closeTabId)}
   <div class="modal-backdrop">
-    <dialog open class="close-dialog" aria-labelledby="close-dialog-title">
+    <dialog open class="close-dialog" aria-modal="true" aria-labelledby="close-dialog-title" use:modalDialog>
       <h2 id="close-dialog-title">Сохранить изменения?</h2>
       <p>Документ «{closingTab?.path?.split(/[\\/]/).at(-1) ?? 'Новый документ'}» содержит несохранённые изменения.</p>
       <div class="close-dialog-actions">

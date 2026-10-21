@@ -11,6 +11,13 @@ export const channelSchemas = {
     openTabs: z.array(z.string()),
     activeTab: z.number().int().nonnegative(),
     lastWorkspace: z.string().nullable(),
+    layout: z.object({
+      explorerWidth: z.number().int().min(190).max(380),
+      annotationsWidth: z.number().int().min(270).max(460),
+      showExplorer: z.boolean(),
+      showAnnotations: z.boolean(),
+      showOutline: z.boolean(),
+    }).optional(),
   }),
   'dialog:saveWorkspace': z.object({
     folders: z.array(z.string().min(1)).min(1),
