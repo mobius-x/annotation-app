@@ -100,6 +100,7 @@ input, textarea, select {
 .tree-icon { width: 15px; color: #bdc4df; text-align: center; }
 .tree-name { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .tree-annotated { color: var(--annot-default); font-size: 11px; }
+.tree-conflict { color: var(--danger); font-size: 11px; }
 .depth-1 { padding-left: 17px; }
 .depth-2 { padding-left: 30px; }
 .depth-3 { padding-left: 43px; }

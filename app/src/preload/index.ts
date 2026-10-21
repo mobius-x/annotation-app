@@ -6,6 +6,7 @@ const channelNames: Channel[] = [
   'dialog:openFolder',
   'fs:list',
   'fs:read',
+  'fs:readSource',
   'fs:watchAck',
   'fs:applyText',
   'fs:save',

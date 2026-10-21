@@ -310,8 +310,7 @@
       tab.annotationPath.toLocaleLowerCase('ru') !== resolved)
     if (sourceChanged) {
       try {
-        const latest = await invoke<OpenedFile>('fs:read', { path: changedPath })
-        const latestOriginal = latest.text.replace(/\r\n?|\n/g, '\n')
+        const latestOriginal = await invoke<string>('fs:readSource', { path: changedPath })
         tabs = tabs.map((tab) => affected.some((item) => item.id === tab.id)
           ? { ...tab, originalText: latestOriginal, status: 'Исходный файл изменён вне приложения' }
           : tab)
@@ -451,7 +450,7 @@
   async function openFile(path?: string): Promise<void> {
     try {
       const result = path
-        ? await invoke<OpenedFile>('fs:read', { path })
+        ? await invoke<OpenedFile | null>('fs:read', { path })
         : await invoke<OpenedFile | null>('dialog:openFile')
       if (!result) return
       switchToDocument(result)
@@ -1272,7 +1271,8 @@
     <span class="tree-chevron">{entry.kind === 'directory' ? expanded.has(entry.path) ? '▾' : '▸' : ''}</span>
     <span class="tree-icon">{entry.kind === 'directory' ? expanded.has(entry.path) ? '▾' : '▸' : entry.name.toLowerCase().endsWith('.md') ? '¶' : '≡'}</span>
     <span class="tree-name">{entry.name.replace(/\.annot\.(json|md)$/i, '')}</span>
-    {#if entry.annotated}<span class="tree-annotated" title="Есть аннотации">✳</span>{/if}
+    {#if entry.annotationConflict}<span class="tree-conflict" title="Найдены оба формата sidecar-аннотаций">⚠</span>
+    {:else if entry.annotated}<span class="tree-annotated" title="Есть аннотации">✳</span>{/if}
   </div>
   {#if entry.kind === 'directory' && expanded.has(entry.path)}
     {#each children[entry.path] ?? [] as child (child.path)}

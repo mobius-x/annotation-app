@@ -107,8 +107,30 @@ async function watchFile(filePath: string): Promise<void> {
   watchedFiles.set(resolved, watcher)
 }
 
-async function openDocumentAndWatch(filePath: string): Promise<OpenedFile> {
-  const opened = await readDocument(filePath)
+async function openDocumentAndWatch(filePath: string): Promise<OpenedFile | null> {
+  const resolvedPath = path.resolve(filePath)
+  let annotationChoice: string | undefined
+  if (!/\.annot\.(json|md)$/i.test(resolvedPath)) {
+    const jsonPath = annotatedPath(resolvedPath)
+    const markdownPath = annotatedPath(resolvedPath, 'md')
+    const [hasJson, hasMarkdown] = await Promise.all([exists(jsonPath), exists(markdownPath)])
+    if (hasJson && hasMarkdown) {
+      if (!mainWindow) return null
+      const choice = await dialog.showMessageBox(mainWindow, {
+        type: 'warning',
+        title: 'Конфликт форматов аннотаций',
+        message: `Для «${path.basename(resolvedPath)}» найдены оба формата аннотаций.`,
+        detail: 'Выберите sidecar, который нужно открыть. Второй файл останется без изменений.',
+        buttons: ['Открыть JSON', 'Открыть Markdown', 'Отмена'],
+        defaultId: 0,
+        cancelId: 2,
+        noLink: true,
+      })
+      if (choice.response === 2) return null
+      annotationChoice = choice.response === 0 ? jsonPath : markdownPath
+    }
+  }
+  const opened = await readDocument(resolvedPath, annotationChoice)
   const paths = new Set([opened.path, opened.annotationPath].filter((item): item is string => Boolean(item)))
   await Promise.all([...paths].map((item) => watchFile(item)))
   return opened
@@ -133,7 +155,7 @@ function decodeBuffer(buffer: Buffer): Pick<OpenedFile, 'text' | 'encoding' | 'h
   }
 }
 
-async function readDocument(filePath: string): Promise<OpenedFile> {
+async function readDocument(filePath: string, annotationChoice?: string): Promise<OpenedFile> {
   if (!isAllowedPath(filePath)) throw new Error('Файл находится вне разрешённой папки.')
   if (/\.(annot\.json|annot\.md)$/i.test(filePath)) {
     const isMarkdown = /\.annot\.md$/i.test(filePath)
@@ -167,10 +189,9 @@ async function readDocument(filePath: string): Promise<OpenedFile> {
   const jsonPath = annotatedPath(filePath)
   const markdownPath = annotatedPath(filePath, 'md')
   const [hasJson, hasMarkdown] = await Promise.all([exists(jsonPath), exists(markdownPath)])
-  if (hasJson && hasMarkdown) throw new Error('Рядом найдены оба формата аннотаций (.annot.json и .annot.md). Откройте нужный файл аннотаций отдельно.')
-  const annotationPath = hasMarkdown ? markdownPath : hasJson ? jsonPath : null
+  const annotationPath = annotationChoice ?? (hasMarkdown ? markdownPath : hasJson ? jsonPath : null)
   const annotationDocument = annotationPath
-    ? hasMarkdown
+    ? /\.annot\.md$/i.test(annotationPath)
       ? parseMarkdownDocument(await fs.readFile(annotationPath, 'utf8'))
       : JSON.parse(await fs.readFile(annotationPath, 'utf8'))
     : undefined
@@ -186,6 +207,12 @@ async function readDocument(filePath: string): Promise<OpenedFile> {
     }
   }
   return { path: filePath, ...decoded, eol, text, originalText: text, annotationPath }
+}
+
+async function readSourceText(filePath: string): Promise<string> {
+  const target = path.resolve(filePath)
+  if (!isAllowedPath(target)) throw new Error('Файл находится вне разрешённой папки.')
+  return decodeBuffer(await fs.readFile(target)).text.replace(/\r\n?|\n/g, '\n')
 }
 
 async function exists(filePath: string): Promise<boolean> {
@@ -221,7 +248,13 @@ async function listDirectory(directory: string): Promise<FileEntry[]> {
       name: entry.name,
       path: path.join(directory, entry.name),
       kind: entry.isDirectory() ? 'directory' as const : 'file' as const,
-      annotated: entry.isFile() && /\.(txt|md)$/i.test(entry.name) && (names.has(path.basename(annotatedPath(path.join(directory, entry.name))).toLocaleLowerCase('ru'))),
+      annotated: entry.isFile() && /\.(txt|md)$/i.test(entry.name) && (
+        names.has(path.basename(annotatedPath(path.join(directory, entry.name))).toLocaleLowerCase('ru')) ||
+        names.has(path.basename(annotatedPath(path.join(directory, entry.name), 'md')).toLocaleLowerCase('ru'))
+      ),
+      annotationConflict: entry.isFile() && /\.(txt|md)$/i.test(entry.name) &&
+        names.has(path.basename(annotatedPath(path.join(directory, entry.name))).toLocaleLowerCase('ru')) &&
+        names.has(path.basename(annotatedPath(path.join(directory, entry.name), 'md')).toLocaleLowerCase('ru')),
     }))
   items.sort((left, right) => Number(right.kind === 'directory') - Number(left.kind === 'directory') || collator.compare(left.name, right.name))
   return items
@@ -423,6 +456,7 @@ function registerIpc(): void {
   })
   installHandler('fs:list', ({ path: directory }) => listDirectory(directory))
   installHandler('fs:read', ({ path: filePath }) => openDocumentAndWatch(path.resolve(filePath)))
+  installHandler('fs:readSource', ({ path: filePath }) => readSourceText(filePath))
   installHandler('fs:watchAck', async ({ path: filePath }) => {
     const target = path.resolve(filePath)
     if (!isAllowedPath(target)) throw new Error('Путь вне разрешённой рабочей области.')
@@ -530,7 +564,9 @@ if (!gotLock) {
     const documentPath = argv.find((argument) => /\.(txt|md)$/i.test(argument))
     if (documentPath && isAllowedPath(path.resolve(documentPath))) {
       allowedRoots.add(path.dirname(path.resolve(documentPath)))
-      void openDocumentAndWatch(path.resolve(documentPath)).then((document) => mainWindow?.webContents.send('file:open', document))
+      void openDocumentAndWatch(path.resolve(documentPath)).then((document) => {
+        if (document) mainWindow?.webContents.send('file:open', document)
+      }).catch((error: unknown) => console.error('Не удалось открыть документ из второго экземпляра.', error))
     }
     mainWindow?.show()
     mainWindow?.focus()

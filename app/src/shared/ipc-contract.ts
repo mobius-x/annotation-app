@@ -5,6 +5,7 @@ export const channelSchemas = {
   'dialog:openFolder': z.void(),
   'fs:list': z.object({ path: z.string().min(1) }),
   'fs:read': z.object({ path: z.string().min(1) }),
+  'fs:readSource': z.object({ path: z.string().min(1) }),
   'fs:watchAck': z.object({ path: z.string().min(1) }),
   'fs:applyText': z.object({
     path: z.string().min(1),
