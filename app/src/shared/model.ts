@@ -49,7 +49,7 @@ export interface FileEntry {
   path: string
   kind: 'file' | 'directory'
   annotated: boolean
-  annotationConflict: boolean
+  annotationConflict?: boolean
 }
 
 export interface OpenedFile {

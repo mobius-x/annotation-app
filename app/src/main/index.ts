@@ -164,7 +164,7 @@ async function readDocument(filePath: string, annotationChoice?: string): Promis
       : JSON.parse(await fs.readFile(filePath, 'utf8')) as AnnotatedDocument
     const source = annotationDocument.document?.source
     const basePath = source ? path.resolve(path.dirname(filePath), source) : filePath.replace(/\.annot\.(?:json|md)$/i, '.txt')
-    if (!isMarkdown && typeof annotationDocument.text !== 'string') throw new Error('В файле аннотаций отсутствует текст.')
+    if (typeof annotationDocument.text !== 'string') throw new Error('В файле аннотаций отсутствует текст.')
     const sourceExists = Boolean(source && await exists(basePath))
     const sourceBytes = sourceExists ? await fs.readFile(basePath) : null
     const sourceDecoded = sourceBytes ? decodeBuffer(sourceBytes) : null
