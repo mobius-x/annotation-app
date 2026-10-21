@@ -14,7 +14,7 @@
   import { annotationField, annotationHistory, focusDecorations, focusViewField, setAnnotationRanges, setFocusView } from './editor/annotation-field'
   import { createLineStarts, createOutlineRows } from './editor/outline'
   import { parseTags } from './editor/annotation-tags'
-  import { createAnnotatedDocument, parseAnnotatedDocument, restoreAnnotations } from './format/json-format'
+  import { createAnnotatedDocument, parseAnnotatedDocument, restoreAnnotations, toPlainAnnotatedDocument } from './format/json-format'
   import { parseShortcut, resolveTheme, settingsSchema, themes, type AppSettings, type UserTheme } from '../shared/settings'
 
   interface DocumentTab {
@@ -1423,6 +1423,7 @@
       const savedFromPath = filePath
       const savedRevision = revision
       const document = await documentForSave()
+      const ipcDocument = document ? toPlainAnnotatedDocument(document) : null
       const savedFile = await invoke<SavedFile | null>('fs:save', {
         path: saveAs ? null : filePath,
         annotationPath: saveAs ? null : annotationPath,
@@ -1430,7 +1431,7 @@
         encoding,
         eol,
         hasBom,
-        document,
+        document: ipcDocument,
         backupIntervalMin: settings.files.backupIntervalMin,
         saveFormat: settings.files.saveFormat,
       })

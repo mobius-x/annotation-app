@@ -108,6 +108,10 @@ export async function createAnnotatedDocument(
   }
 }
 
+export function toPlainAnnotatedDocument(document: AnnotatedDocument): AnnotatedDocument {
+  return JSON.parse(JSON.stringify(document)) as AnnotatedDocument
+}
+
 export function restoreAnnotations(document: AnnotatedDocument): { annotations: Annotation[]; shifted: number; orphaned: number } {
   let shifted = 0
   let orphaned = 0
