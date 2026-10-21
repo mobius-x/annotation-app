@@ -1067,7 +1067,9 @@ kbd {
 
 .search-clear:hover { background: var(--hover); color: var(--ui-fg); }
 
-.filter-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.filter-controls { display: grid; gap: 6px; min-width: 0; }
+.filter-control-row { display: grid; grid-template-columns: 16px minmax(0, 1fr); align-items: center; gap: 8px; min-width: 0; }
+.filter-control-row > .icon { justify-self: center; color: var(--fg-muted); flex: 0 0 14px; }
 
 .select-wrap {
   position: relative;
@@ -1157,22 +1159,24 @@ kbd {
 .select-wrap > .icon:not(:last-child) { position: static; right: auto; }
 
 .select-wrap.compact { height: 28px; padding: 0 6px; border-radius: 5px; }
-.select-wrap.compact select { font-size: 0.8em; padding-right: 14px; max-width: 118px; }
+.select-wrap.compact select { display: flex; align-items: center; width: 100%; min-width: 0; max-width: none; flex: 1 1 auto; font-size: 1em; line-height: 1; padding: 0 14px 0 0; white-space: nowrap; }
 .select-wrap.compact > .icon { right: 5px; }
-.sort-wrap { margin-left: auto; }
-.sort-wrap > .icon:first-child { color: var(--fg-muted); }
+.filter-dropdown { width: 100%; min-width: 0; }
 
 .filter-toggle {
   display: inline-flex;
   align-items: center;
   gap: 5px;
+  width: 100%;
   height: 28px;
-  padding: 0 7px;
-  border: 1px solid transparent;
+  padding: 0 6px;
+  border: 1px solid var(--border);
   border-radius: 5px;
-  color: var(--fg-muted);
+  background: var(--ui-bg-alt);
+  color: var(--ui-fg);
   font-size: 0.8em;
   white-space: nowrap;
+  text-align: left;
 }
 
 .filter-toggle:hover { background: var(--hover); color: var(--ui-fg); }

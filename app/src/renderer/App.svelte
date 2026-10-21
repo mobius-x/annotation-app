@@ -2826,32 +2826,43 @@
               </button>
             {/if}
           </div>
-          <div class="filter-row">
-            <label class="select-wrap compact" title="Фильтр по типу">
-              <select bind:value={filterType} onchange={() => { annotationScrollTop = 0; if (annotationScrollHost) annotationScrollHost.scrollTop = 0 }} aria-label="Фильтр по типу аннотации">
-                <option value="all">Все типы</option>
-                {#each annotationTypes as type}<option value={type.id}>{type.label}</option>{/each}
-              </select>
-              <Icon name="chevron-down" size={12} />
-            </label>
-            <label class="select-wrap compact" title="Фильтр по статусу">
-              <select bind:value={filterStatus} onchange={() => { annotationScrollTop = 0; if (annotationScrollHost) annotationScrollHost.scrollTop = 0 }} aria-label="Фильтр по статусу">
-                <option value="all">Все статусы</option><option value="open">Открытые</option><option value="resolved">Решённые</option><option value="archived">Архив</option>
-              </select>
-              <Icon name="chevron-down" size={12} />
-            </label>
-            <button class="filter-toggle" class:active={hideResolved} aria-pressed={hideResolved} onclick={() => { hideResolved = !hideResolved; annotationScrollTop = 0; if (annotationScrollHost) annotationScrollHost.scrollTop = 0 }}>
-              <Icon name="check-circle" size={13} /><span>Без решённых</span>
-            </button>
-            <label class="select-wrap compact sort-wrap" title="Порядок аннотаций">
-              <Icon name="sort" size={12} />
-              <select bind:value={settings.annotationsPanel.sort} onchange={() => { annotationScrollTop = 0; if (annotationScrollHost) annotationScrollHost.scrollTop = 0; scheduleSettingsSave() }} aria-label="Порядок аннотаций">
-                <option value="position">По тексту</option>
-                <option value="created">По созданию</option>
-                <option value="modified">По изменению</option>
-              </select>
-              <Icon name="chevron-down" size={12} />
-            </label>
+          <div class="filter-controls">
+            <div class="filter-control-row">
+              <Icon name="filter" size={14} />
+              <label class="select-wrap compact filter-dropdown" title="Фильтр по типу">
+                <select bind:value={filterType} onchange={() => { annotationScrollTop = 0; if (annotationScrollHost) annotationScrollHost.scrollTop = 0 }} aria-label="Фильтр по типу аннотации">
+                  <option value="all">Все типы</option>
+                  {#each annotationTypes as type}<option value={type.id}>{type.label}</option>{/each}
+                </select>
+                <Icon name="chevron-down" size={12} />
+              </label>
+            </div>
+            <div class="filter-control-row">
+              <Icon name="circle" size={14} />
+              <label class="select-wrap compact filter-dropdown" title="Фильтр по статусу">
+                <select bind:value={filterStatus} onchange={() => { annotationScrollTop = 0; if (annotationScrollHost) annotationScrollHost.scrollTop = 0 }} aria-label="Фильтр по статусу">
+                  <option value="all">Все статусы</option><option value="open">Открытые</option><option value="resolved">Решённые</option><option value="archived">Архив</option>
+                </select>
+                <Icon name="chevron-down" size={12} />
+              </label>
+            </div>
+            <div class="filter-control-row">
+              <Icon name="sort" size={14} />
+              <label class="select-wrap compact filter-dropdown" title="Порядок аннотаций">
+                <select bind:value={settings.annotationsPanel.sort} onchange={() => { annotationScrollTop = 0; if (annotationScrollHost) annotationScrollHost.scrollTop = 0; scheduleSettingsSave() }} aria-label="Порядок аннотаций">
+                  <option value="position">По тексту</option>
+                  <option value="created">По созданию</option>
+                  <option value="modified">По изменению</option>
+                </select>
+                <Icon name="chevron-down" size={12} />
+              </label>
+            </div>
+            <div class="filter-control-row">
+              <Icon name="check-circle" size={14} />
+              <button class="filter-dropdown filter-toggle" class:active={hideResolved} aria-pressed={hideResolved} onclick={() => { hideResolved = !hideResolved; annotationScrollTop = 0; if (annotationScrollHost) annotationScrollHost.scrollTop = 0 }}>
+                Без решённых
+              </button>
+            </div>
           </div>
         </div>
 
