@@ -8,4 +8,4 @@ app/release/
 .env
 .env.*
 !.env.example
-.env
+plan1.md

@@ -74,16 +74,18 @@ export interface SaveRequest {
   annotationPath: string | null
   text: string
   encoding: string
-  eol: string
+  eol: '\n' | '\r\n' | '\r'
   hasBom: boolean
   document: AnnotatedDocument | null
+  backupIntervalMin: number
+  saveFormat: 'json' | 'md'
 }
 
 export interface ApplyTextRequest {
   path: string
   text: string
   encoding: string
-  eol: string
+  eol: '\n' | '\r\n' | '\r'
   hasBom: boolean
 }
 

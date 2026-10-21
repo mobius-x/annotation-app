@@ -4,7 +4,13 @@ import { invertedEffects } from '@codemirror/commands'
 import type { Annotation } from '../../shared/model'
 
 export const setAnnotationRanges = StateEffect.define<Annotation[]>()
-export const setFocusView = StateEffect.define<boolean>()
+export interface FocusViewOptions {
+  enabled: boolean
+  contextChars: number
+  separator: 'blank1' | 'blank2' | 'ellipsis'
+}
+
+export const setFocusView = StateEffect.define<FocusViewOptions>()
 
 export function getFocusRanges(annotations: Annotation[], length: number, contextChars = 0): Array<{ from: number; to: number }> {
   const sorted = annotations
@@ -24,18 +30,20 @@ export function getFocusRanges(annotations: Annotation[], length: number, contex
 }
 
 class FocusGapWidget extends WidgetType {
+  constructor(private readonly separator: FocusViewOptions['separator']) {
+    super()
+  }
+
   toDOM(): HTMLElement {
     const gap = document.createElement('span')
     gap.className = 'cm-focus-gap'
-    gap.textContent = '\n\n'
+    gap.textContent = this.separator === 'ellipsis' ? '…' : this.separator === 'blank1' ? '\n' : '\n\n'
     return gap
   }
 }
 
-const focusGapWidget = new FocusGapWidget()
-
-export const focusViewField = StateField.define<boolean>({
-  create: () => false,
+export const focusViewField = StateField.define<FocusViewOptions>({
+  create: () => ({ enabled: false, contextChars: 0, separator: 'blank2' }),
   update(enabled, transaction) {
     for (const effect of transaction.effects) {
       if (effect.is(setFocusView)) enabled = effect.value
@@ -49,11 +57,11 @@ export const focusDecorations = StateField.define<DecorationSet>({
   update(decorations, transaction) {
     if (!transaction.docChanged
       && !transaction.effects.some((effect) => effect.is(setAnnotationRanges) || effect.is(setFocusView))) return decorations
-    const enabled = transaction.state.field(focusViewField)
+    const options = transaction.state.field(focusViewField)
     return buildFocusDecorations(
       transaction.newDoc.length,
       transaction.state.field(annotationField),
-      enabled,
+      options,
     )
   },
   provide: (field) => [
@@ -62,16 +70,16 @@ export const focusDecorations = StateField.define<DecorationSet>({
   ],
 })
 
-function buildFocusDecorations(length: number, annotations: Annotation[], enabled: boolean): DecorationSet {
-  if (!enabled) return Decoration.none
-  const visible = getFocusRanges(annotations, length)
+function buildFocusDecorations(length: number, annotations: Annotation[], options: FocusViewOptions): DecorationSet {
+  if (!options.enabled) return Decoration.none
+  const visible = getFocusRanges(annotations, length, options.contextChars)
   const gaps: Range<Decoration>[] = []
   let position = 0
   for (const range of visible) {
-    if (range.from > position) gaps.push(Decoration.replace({ widget: focusGapWidget, inclusive: false }).range(position, range.from))
+    if (range.from > position) gaps.push(Decoration.replace({ widget: new FocusGapWidget(options.separator), inclusive: false }).range(position, range.from))
     position = range.to
   }
-  if (position < length) gaps.push(Decoration.replace({ widget: focusGapWidget, inclusive: false }).range(position, length))
+  if (position < length) gaps.push(Decoration.replace({ widget: new FocusGapWidget(options.separator), inclusive: false }).range(position, length))
   return Decoration.set(gaps, true)
 }
 
