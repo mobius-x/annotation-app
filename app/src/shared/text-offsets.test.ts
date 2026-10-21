@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import fc from 'fast-check'
 import { quoteContext, restoreQuoteAnchor, textOffsetsAt } from './text-offsets'
 
 describe('text offset adapters and quote anchors', () => {
@@ -24,5 +25,20 @@ describe('text offset adapters and quote anchors', () => {
 
   it('returns no anchor when the quote was removed', () => {
     expect(restoreQuoteAnchor('другой текст', { exact: 'цитата' }, 0)).toBeNull()
+  })
+  it('keeps generated UTF-16 offsets stable across Unicode prefixes', () => {
+    fc.assert(fc.property(
+      fc.array(fc.constantFrom('a', 'Ж', '😀', 'e\u0301'), { maxLength: 40 }),
+      fc.array(fc.constantFrom('b', 'я', '🧪'), { maxLength: 20 }),
+      (prefixParts, suffixParts) => {
+        const prefix = prefixParts.join('')
+        const exact = 'quoted'
+        const text = `${prefix}${exact}${suffixParts.join('')}`
+        const start = prefix.length
+        const result = restoreQuoteAnchor(text, quoteContext(text, start, start + exact.length), start)
+        expect(result).toEqual({ start, end: start + exact.length, ambiguous: false })
+        expect(text.slice(result!.start, result!.end)).toBe(exact)
+      },
+    ), { numRuns: 150 })
   })
 })

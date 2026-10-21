@@ -56,7 +56,7 @@ export async function exportDocx(document: AnnotatedDocument): Promise<Uint8Arra
     id: index,
     author: item.author ?? 'Annotator',
     date: new Date(item.created),
-    children: [new Paragraph(`${item.type} · ${item.status ?? (item.resolved ? 'resolved' : 'open')}${item.tags.length ? ` · #${item.tags.join(' #')}` : ''}`), new Paragraph(item.body || 'Без заметки')],
+    children: [new Paragraph(`[Annotator:${item.type}:${item.status ?? (item.resolved ? 'resolved' : 'open')}]`), new Paragraph(item.body || 'No note')],
   }))
   const docx = new Document({
     title: document.document.title,
@@ -89,7 +89,7 @@ function epubHtml(document: AnnotatedDocument): string {
 }
 
 export function exportEpub(document: AnnotatedDocument): Uint8Array {
-  const id = `urn:uuid:${document.document.textSha256 || 'annotator-document'}`
+  const id = `urn:sha256:${document.document.textSha256 || 'annotator-document'}`
   const container = `<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/package.opf" media-type="application/oebps-package+xml"/></rootfiles></container>`
   const packageOpf = `<?xml version="1.0" encoding="UTF-8"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="book-id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="book-id">${escapeXml(id)}</dc:identifier><dc:title>${escapeXml(document.document.title)}</dc:title><dc:language>ru</dc:language><meta property="dcterms:modified">${new Date().toISOString().replace(/\.\d{3}Z$/, 'Z')}</meta></metadata><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/><item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/></manifest><spine><itemref idref="chapter"/></spine></package>`
   const nav = `<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><head><title>Содержание</title></head><body><nav epub:type="toc"><h1>Содержание</h1><ol><li><a href="chapter.xhtml">${escapeXml(document.document.title)}</a></li></ol></nav></body></html>`
@@ -214,7 +214,8 @@ export function extractEpub(bytes: Uint8Array): { document?: AnnotatedDocument; 
   const embedded = archive['OEBPS/annotator-document.json']
   if (embedded) return { document: JSON.parse(new TextDecoder().decode(embedded)) as AnnotatedDocument, text: '', annotations: [] }
   const xhtml = new TextDecoder().decode(archive['OEBPS/chapter.xhtml'] ?? new Uint8Array())
-  const text = decodeXml(xhtml.replace(/<br\s*\/?\s*>/gi, '\n').replace(/<\/p>/gi, '\n\n').replace(/<[^>]*>/g, '')).trim()
+  const article = xhtml.match(/<article\b[^>]*>([\s\S]*?)<\/article>/i)?.[1] ?? xhtml
+  const text = decodeXml(article.replace(/<br\s*\/?\s*>/gi, '\n').replace(/<\/p>/gi, '\n\n').replace(/<[^>]*>/g, '')).trim()
   const annotations = [...xhtml.matchAll(/<aside\b[^>]*id="note-([^"]+)"[^>]*>[\s\S]*?<blockquote>([\s\S]*?)<\/blockquote>[\s\S]*?<p>([\s\S]*?)<\/p>[\s\S]*?<\/aside>/gi)].map((match) => ({ id: match[1]!, quote: decodeXml(match[2]!.replace(/<[^>]*>/g, '')), note: decodeXml(match[3]!.replace(/<[^>]*>/g, '')) }))
   return { text, annotations }
 }

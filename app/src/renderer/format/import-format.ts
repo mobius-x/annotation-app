@@ -209,7 +209,8 @@ export async function parseExternalDocument(name: string, source: string, binary
     const records: ImportedAnnotation[] = []
     for (const [commentId, comment] of extracted.comments) {
       const match = comment.text.match(/^(\d+):(\d+)\n([\s\S]*)$/)
-      records.push({ id: `docx-${commentId}`, type: 'comment', quote: match ? extracted.text.slice(Number(match[1]), Number(match[2])) : '', note: match ? match[3]! : comment.text,
+      const note = (match ? match[3]! : comment.text).replace(/^\[Annotator:[^\]]+\]\s*/, '')
+      records.push({ id: `docx-${commentId}`, type: 'comment', quote: match ? extracted.text.slice(Number(match[1]), Number(match[2])) : '', note,
         ...(match ? { start: Number(match[1]), end: Number(match[2]) } : {}), author: comment.author })
     }
     return buildImportedDocument(extracted.text, records, name)

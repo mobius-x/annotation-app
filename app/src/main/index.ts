@@ -15,6 +15,7 @@ import { isPathWithin, uniqueTransferName, validateFileEntryName } from '../shar
 import { parseWorkspaceFile, serializeWorkspaceFile, workspacePathFromFile } from '../shared/workspace-format'
 import { appStateSchema, type AppState } from '../shared/app-state'
 import { decodeTextBuffer as decodeBuffer, encodeTextBuffer } from '../shared/text-encoding'
+import { loadSelectedInterchange, saveSelectedExport } from './interchange-io'
 import type { AnnotatedDocument, ApplyTextRequest, FileEntry, OpenedFile, RecoverySnapshot, SaveRequest, SavedFile } from '../shared/model'
 
 const currentDir = path.dirname(fileURLToPath(import.meta.url))
@@ -1252,17 +1253,14 @@ function registerIpc(): void {
       properties: ['openFile'],
       filters: [{ name: 'Форматы аннотаций', extensions: ['json', 'md', 'html', 'htm', 'critic.md', 'web-annotation.json', 'hypothesis.json', 'docx', 'epub'] }, { name: 'Все файлы', extensions: ['*'] }],
     })
-    if (result.canceled || !result.filePaths[0]) return null
-    const filePath = path.resolve(result.filePaths[0])
-    allowedRoots.add(path.dirname(filePath))
-    const bytes = await fs.readFile(filePath)
-    if (bytes.byteLength > 50 * 1024 * 1024) throw new Error('Импортируемый файл превышает ограничение 50 МБ.')
-    return { name: path.basename(filePath), path: filePath, content: (filePath.toLowerCase().endsWith('.docx') || filePath.toLowerCase().endsWith('.epub')) ? new Uint8Array(bytes) : bytes.toString('utf8') }
+    return loadSelectedInterchange(result, (filePath) => fs.readFile(filePath), (directory) => allowedRoots.add(directory))
   })
   installHandler('dialog:saveExport', async ({ format, content }) => {
     if (!mainWindow) return null
     const formats = {
-      markdown: { extension: 'md', name: 'Markdown' }, html: { extension: 'html', name: 'HTML' },
+      markdown: { extension: 'md', name: 'Markdown' },
+      'markdown-blockquote': { extension: 'md', name: 'Markdown blockquote' }, 'markdown-callout': { extension: 'md', name: 'Markdown Callouts' },
+      html: { extension: 'html', name: 'HTML' },
       'combined-txt': { extension: 'txt', name: 'Комбинированный TXT' }, json: { extension: 'json', name: 'JSON' },
       'critic-markup': { extension: 'critic.md', name: 'CriticMarkup' }, csv: { extension: 'csv', name: 'CSV' },
       tsv: { extension: 'tsv', name: 'TSV' }, w3c: { extension: 'web-annotation.json', name: 'W3C Web Annotation' },
@@ -1276,11 +1274,7 @@ function registerIpc(): void {
       defaultPath: `annotator-export.${definition.extension}`,
       filters: [{ name: definition.name, extensions: [definition.extension] }],
     })
-    if (result.canceled || !result.filePath) return null
-    const target = path.resolve(result.filePath)
-    allowedRoots.add(path.dirname(target))
-    await atomicWrite(target, typeof content === 'string' ? Buffer.from(content, 'utf8') : Buffer.from(content))
-    return target
+    return saveSelectedExport(result, content, (target, bytes) => atomicWrite(target, Buffer.from(bytes)), (directory) => allowedRoots.add(directory))
   })
   installHandler('state:get', async () => {
     const result = await readAppState()

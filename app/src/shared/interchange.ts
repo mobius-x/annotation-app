@@ -5,6 +5,7 @@ import { exportDocx, exportEpub, exportSqlite, exportDuckDb } from './binary-for
 export type ExchangeFormat =
   | 'markdown' | 'html' | 'combined-txt' | 'json' | 'critic-markup' | 'csv' | 'tsv'
   | 'w3c' | 'pandoc' | 'tei' | 'obsidian' | 'hypothesis' | 'docx' | 'epub' | 'sqlite' | 'duckdb'
+  | 'markdown-blockquote' | 'markdown-callout'
 
 export interface ExportFormatDefinition {
   id: ExchangeFormat
@@ -219,6 +220,8 @@ function hypothesisExport(document: AnnotatedDocument): string {
 
 export const exportFormats: ExportFormatDefinition[] = [
   { id: 'markdown', label: 'Markdown (сноски)', extension: 'md', mime: 'text/markdown;charset=utf-8', serialize: (doc) => textProjection(doc, 'footnote') },
+  { id: 'markdown-blockquote', label: 'Markdown (blockquote)', extension: 'md', mime: 'text/markdown;charset=utf-8', serialize: (doc) => textProjection(doc, 'blockquote') },
+  { id: 'markdown-callout', label: 'Markdown (Obsidian Callouts)', extension: 'md', mime: 'text/markdown;charset=utf-8', serialize: (doc) => textProjection(doc, 'callout') },
   { id: 'html', label: 'HTML (самостоятельный)', extension: 'html', mime: 'text/html;charset=utf-8', serialize: htmlExport },
   { id: 'combined-txt', label: 'TXT (оригинал + аннотации)', extension: 'txt', mime: 'text/plain;charset=utf-8', serialize: combinedText },
   { id: 'json', label: 'JSON (полный документ)', extension: 'json', mime: 'application/json;charset=utf-8', serialize: (doc) => JSON.stringify(doc, null, 2) },

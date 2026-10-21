@@ -34,6 +34,16 @@ describe('external document import', () => {
     expect(parsed.annotations[0]).toMatchObject({ range: null, quote: { exact: 'цитата', prefix: 'до ', suffix: ' после' }, body: 'Найти источник' })
   })
 
+  it('imports Hypothesis quote selectors and metadata as orphan notes without source text', async () => {
+    const hypothesis = JSON.stringify({ rows: [{ id: 'hyp-1', text: 'Review this', tags: ['source'], target: [{ selector: [
+      { type: 'TextQuoteSelector', exact: 'target quote', prefix: 'before ', suffix: ' after' },
+      { type: 'TextPositionSelector', start: 10, end: 22 },
+    ] }] }] })
+    const parsed = await parseExternalDocument('hypothesis.json', hypothesis)
+    expect(parsed.text).toBe('')
+    expect(parsed.annotations[0]).toMatchObject({ id: 'hyp-1', body: 'Review this', tags: ['source'], range: null, quote: { exact: 'target quote', prefix: 'before ', suffix: ' after' } })
+  })
+
   it('imports CriticMarkup and preserves the original quote in the text layer', async () => {
     const parsed = await parseExternalDocument('review.critic.md', 'Фраза {~~старый текст~>новая версия~~}.')
     expect(parsed.text).toBe('Фраза старый текст.')

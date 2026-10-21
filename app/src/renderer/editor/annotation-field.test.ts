@@ -58,3 +58,26 @@ describe('focus view ranges', () => {
     expect(getFocusRanges([{ ...note, start: 2, end: 4 }], 10, 5)).toEqual([{ from: 0, to: 9 }])
   })
 })
+
+describe('annotation ranges through editor changes', () => {
+  it('maps edits before, inside, and at both boundaries using UTF-16 positions', () => {
+    let state = EditorState.create({ doc: '0123456789', extensions: [annotationField] })
+    state = state.update({ effects: setAnnotationRanges.of([{ ...note, start: 3, end: 7 }]) }).state
+    state = state.update({ changes: { from: 0, insert: '😀' } }).state
+    expect(state.field(annotationField)[0]).toMatchObject({ start: 5, end: 9 })
+    state = state.update({ changes: { from: 7, insert: 'X' } }).state
+    expect(state.field(annotationField)[0]).toMatchObject({ start: 5, end: 10 })
+    state = state.update({ changes: { from: 5, insert: 'Y' } }).state
+    expect(state.field(annotationField)[0]).toMatchObject({ start: 6, end: 11 })
+  })
+
+  it('orphans a collapsed annotation and retains overlapping annotations independently', () => {
+    let state = EditorState.create({ doc: 'abcdefghij', extensions: [annotationField] })
+    const overlapping = [{ ...note, start: 1, end: 5 }, { ...note, id: 'second', start: 3, end: 7 }]
+    state = state.update({ effects: setAnnotationRanges.of(overlapping) }).state
+    state = state.update({ changes: { from: 1, to: 5, insert: '' } }).state
+    expect(state.field(annotationField)).toHaveLength(2)
+    expect(state.field(annotationField)[0]).toMatchObject({ orphan: true })
+    expect(state.field(annotationField)[1]).toMatchObject({ id: 'second', start: 1, end: 3 })
+  })
+})

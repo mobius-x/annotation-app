@@ -7,7 +7,7 @@ export const channelSchemas = {
   'dialog:chooseEncoding': z.object({ current: z.string().min(1) }),
   'dialog:importInterchange': z.void(),
   'dialog:saveExport': z.object({
-    format: z.enum(['markdown', 'html', 'combined-txt', 'json', 'critic-markup', 'csv', 'tsv', 'w3c', 'pandoc', 'tei', 'obsidian', 'hypothesis', 'docx', 'epub', 'sqlite', 'duckdb']),
+    format: z.enum(['markdown', 'markdown-blockquote', 'markdown-callout', 'html', 'combined-txt', 'json', 'critic-markup', 'csv', 'tsv', 'w3c', 'pandoc', 'tei', 'obsidian', 'hypothesis', 'docx', 'epub', 'sqlite', 'duckdb']),
     content: z.union([z.string(), z.instanceof(Uint8Array)]),
   }),
   'state:get': z.void(),

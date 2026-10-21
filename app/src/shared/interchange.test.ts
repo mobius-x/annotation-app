@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { createAnnotatedDocument } from '../renderer/format/json-format'
 import { exportFormats, serializeExchange } from './interchange'
 import type { Annotation } from './model'
-import { unzipSync } from 'fflate'
+import { unzipSync, zipSync } from 'fflate'
 import { extractDocxText } from './binary-formats'
 import { parseExternalDocument } from '../renderer/format/import-format'
 import initSqlJs from 'sql.js/dist/sql-wasm-inline.js'
@@ -17,7 +17,7 @@ const annotations: Annotation[] = [
 describe('interchange exporters', () => {
   it('offers every current export with a stable id and extension', () => {
     expect(exportFormats.map(({ id, extension }) => [id, extension])).toEqual([
-      ['markdown', 'md'], ['html', 'html'], ['combined-txt', 'txt'], ['json', 'json'],
+      ['markdown', 'md'], ['markdown-blockquote', 'md'], ['markdown-callout', 'md'], ['html', 'html'], ['combined-txt', 'txt'], ['json', 'json'],
       ['critic-markup', 'critic.md'], ['csv', 'csv'], ['tsv', 'tsv'], ['w3c', 'web-annotation.json'],
       ['pandoc', 'pandoc.json'], ['tei', 'tei.xml'], ['obsidian', 'md'], ['hypothesis', 'hypothesis.json'],
       ['docx', 'docx'], ['epub', 'epub'], ['sqlite', 'sqlite'], ['duckdb', 'duckdb'],
@@ -57,6 +57,8 @@ describe('interchange exporters', () => {
     expect(pandoc.blocks.length).toBeGreaterThan(0)
     expect(await serializeExchange(document, 'combined-txt')).toContain('STATUS=resolved')
     expect(await serializeExchange(document, 'markdown')).toContain('[^1]')
+    expect(await serializeExchange(document, 'markdown-blockquote')).toContain('> **1.')
+    expect(await serializeExchange(document, 'markdown-callout')).toContain('> [!question]')
     expect(await serializeExchange(document, 'tsv')).toContain('\t')
     await expect(serializeExchange(document, 'unsupported' as never)).rejects.toThrow()
   })
@@ -69,12 +71,22 @@ describe('interchange exporters', () => {
     const roundtrip = await parseExternalDocument('roundtrip.docx', '', docx)
     expect(roundtrip.text).toBe(document.text)
     expect(roundtrip.annotations[0]?.body).toBe('Check this')
+    const externalDocx = unzipSync(docx)
+    delete externalDocx['customXml/annotator-document.json']
+    const importedDocx = await parseExternalDocument('external.docx', '', zipSync(externalDocx))
+    expect(importedDocx.text).toBe(document.text)
+    expect(importedDocx.annotations[0]?.body).toBe('Check this')
 
-    const epub = unzipSync(await serializeExchange(document, 'epub') as Uint8Array)
+    const epubBytes = await serializeExchange(document, 'epub') as Uint8Array
+    const epub = unzipSync(epubBytes)
     expect(new TextDecoder().decode(epub.mimetype)).toBe('application/epub+zip')
     expect(epub['OEBPS/chapter.xhtml']).toBeDefined()
     const epubRoundtrip = await parseExternalDocument('roundtrip.epub', '', await serializeExchange(document, 'epub') as Uint8Array)
     expect(epubRoundtrip.text).toBe(document.text)
+    delete epub['OEBPS/annotator-document.json']
+    const importedEpub = await parseExternalDocument('external.epub', '', zipSync(epub))
+    expect(importedEpub.text).toBe(document.text)
+    expect(importedEpub.annotations[0]?.body).toBe('Check this')
     const sqlite = await serializeExchange(document, 'sqlite') as Uint8Array
     const SQL = await initSqlJs()
     const database = new SQL.Database(sqlite)
