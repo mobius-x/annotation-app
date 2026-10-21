@@ -17,6 +17,7 @@
   import { createAnnotatedDocument, parseAnnotatedDocument, restoreAnnotations, toPlainAnnotatedDocument } from './format/json-format'
   import { getAnnotationMarkerColor, parseShortcut, resolveTheme, settingsSchema, themes, type AppSettings, type ThemePalette, type UserTheme } from '../shared/settings'
   import Icon from './Icon.svelte'
+  import FontPicker from './FontPicker.svelte'
 
   type SettingsSection = 'appearance' | 'typography' | 'editor' | 'annotations' | 'colors' | 'files' | 'shortcuts'
   type ConfirmChoice = 'confirm' | 'cancel' | 'tertiary'
@@ -1985,6 +1986,7 @@
   }
 
   function handleKeydown(event: KeyboardEvent): void {
+    if (document.querySelector('select:open')) return
     const code = event.code
     const mod = event.ctrlKey && !event.altKey && !event.metaKey
     const typing = (event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLInputElement)
@@ -3018,10 +3020,10 @@
           {#if settingsSection === 'typography'}
             <section class="setting-group">
               <div class="group-heading"><h3>Интерфейс</h3><p>Панели, меню и подписи.</p></div>
-              <label class="setting-block">
+              <div class="setting-block">
                 <span class="setting-title">Шрифт интерфейса</span>
-                <input list="available-fonts" bind:value={settings.ui.fontFamily} oninput={applyTheme} />
-              </label>
+                <FontPicker bind:value={settings.ui.fontFamily} suggestions={fontSuggestions} label="Шрифт интерфейса" onValueChange={applyTheme} />
+              </div>
               <label class="setting-row">
                 <span class="setting-copy"><span class="setting-title">Размер интерфейса</span><span class="setting-hint">Влияет на панели и элементы управления.</span></span>
                 <span class="range-control">
@@ -3032,10 +3034,10 @@
             </section>
             <section class="setting-group">
               <div class="group-heading"><h3>Текст документа</h3><p>Основной шрифт для чтения и правки.</p></div>
-              <label class="setting-block">
+              <div class="setting-block">
                 <span class="setting-title">Шрифт редактора</span>
-                <input list="available-fonts" bind:value={settings.editor.fontFamily} oninput={applyTheme} />
-              </label>
+                <FontPicker bind:value={settings.editor.fontFamily} suggestions={fontSuggestions} label="Шрифт редактора" onValueChange={applyTheme} />
+              </div>
               <label class="setting-row">
                 <span class="setting-copy"><span class="setting-title">Размер текста</span><span class="setting-hint">Ctrl+колесо также меняет размер.</span></span>
                 <span class="range-control">
@@ -3060,10 +3062,10 @@
             </section>
             <section class="setting-group">
               <div class="group-heading"><h3>Заметки на полях</h3><p>Шрифт карточек и композера аннотаций.</p></div>
-              <label class="setting-block">
+              <div class="setting-block">
                 <span class="setting-title">Шрифт аннотаций</span>
-                <input list="available-fonts" bind:value={settings.annotationsPanel.fontFamily} oninput={applyTheme} />
-              </label>
+                <FontPicker bind:value={settings.annotationsPanel.fontFamily} suggestions={fontSuggestions} label="Шрифт аннотаций" onValueChange={applyTheme} />
+              </div>
               <label class="setting-row">
                 <span class="setting-copy"><span class="setting-title">Размер аннотаций</span></span>
                 <span class="range-control">
@@ -3086,7 +3088,6 @@
                   <Icon name="type" size={15} /><span>Загрузить системные шрифты</span>
                 </button>
               </div>
-              <datalist id="available-fonts">{#each fontSuggestions as font}<option value={font}></option>{/each}</datalist>
               <p class="inline-note">Семейство шрифта можно ввести вручную, даже если его нет в списке.</p>
             </section>
           {/if}

@@ -1080,8 +1080,8 @@ kbd {
 .select-wrap:hover { border-color: color-mix(in srgb, var(--ui-fg) 24%, var(--border)); }
 
 .select-wrap select {
-  appearance: none;
-  -webkit-appearance: none;
+  appearance: base-select;
+  -webkit-appearance: base-select;
   height: 100%;
   min-width: 0;
   max-width: 140px;
@@ -1094,6 +1094,49 @@ kbd {
   font-size: 0.88em;
   cursor: pointer;
   outline: none;
+}
+
+.select-wrap select::picker-icon { display: none; }
+
+.select-wrap select::picker(select) {
+  appearance: base-select;
+  -webkit-appearance: base-select;
+  position-area: bottom span-right;
+  position-try-fallbacks: flip-block, flip-inline;
+  min-width: anchor-size(width);
+  max-width: min(320px, calc(100vw - 32px));
+  margin-block: 6px;
+  padding: 5px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--ui-bg);
+  color: var(--ui-fg);
+  box-shadow: var(--shadow-flyout);
+}
+
+.select-wrap select option {
+  display: flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 5px 28px 5px 9px;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--ui-fg);
+  font: inherit;
+  cursor: pointer;
+}
+
+.select-wrap select option:hover,
+.select-wrap select option:focus { background: var(--hover); }
+
+.select-wrap select option:checked {
+  background: color-mix(in srgb, var(--accent) 16%, var(--ui-bg));
+}
+
+.select-wrap select option::checkmark {
+  margin-inline: 0 8px;
+  color: var(--accent);
+  font-size: 0.9em;
 }
 
 .select-wrap select:focus-visible { outline: none; box-shadow: none; }
@@ -1583,6 +1626,70 @@ button.line-badge:hover { background: var(--hover); color: var(--ui-fg); }
   border-radius: 6px;
   background: var(--ui-bg-alt);
   color: var(--ui-fg);
+}
+
+.font-picker { position: relative; }
+
+.font-picker input { padding-right: 36px; }
+
+.font-picker-toggle {
+  position: absolute;
+  top: 4px;
+  right: 5px;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 5px;
+  color: var(--fg-muted);
+}
+
+.font-picker-toggle:hover { background: var(--hover); color: var(--ui-fg); }
+
+.font-picker-list {
+  position: fixed;
+  z-index: 130;
+  max-height: 260px;
+  min-width: 220px;
+  padding: 5px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--ui-bg);
+  color: var(--ui-fg);
+  box-shadow: var(--shadow-flyout);
+}
+
+.font-picker-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 30px;
+  padding: 5px 9px;
+  border-radius: 5px;
+  text-align: start;
+  cursor: pointer;
+}
+
+.font-picker-option:hover,
+.font-picker-option.active { background: var(--hover); }
+
+.font-picker-option.selected { color: var(--accent); }
+
+.font-picker-sample {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 1.02em;
+}
+
+.font-picker-empty {
+  margin: 0;
+  padding: 9px 10px;
+  color: var(--fg-muted);
+  font-size: 0.85em;
+  line-height: 1.45;
 }
 
 .switch-row { cursor: pointer; }
