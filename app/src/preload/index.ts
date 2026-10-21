@@ -6,6 +6,7 @@ const channelNames: Channel[] = [
   'dialog:openFolder',
   'fs:list',
   'fs:read',
+  'fs:watchAck',
   'fs:save',
   'settings:get',
   'settings:save',
@@ -33,6 +34,11 @@ const api = {
     const listener = () => callback()
     ipcRenderer.on('workspace:refresh', listener)
     return () => ipcRenderer.removeListener('workspace:refresh', listener)
+  },
+  onFileChanged(callback: (change: { path: string }) => void): () => void {
+    const listener = (_event: Electron.IpcRendererEvent, change: { path: string }) => callback(change)
+    ipcRenderer.on('file:changed', listener)
+    return () => ipcRenderer.removeListener('file:changed', listener)
   },
 }
 

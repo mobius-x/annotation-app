@@ -32,6 +32,7 @@
     revision: number
     recoveryDigest: string
     selection: { anchor: number; head: number }
+    externalChangePaths: string[]
   }
 
   let editorHost: HTMLDivElement
@@ -40,6 +41,7 @@
   let activeTabId = $state('')
   let closeTabId = $state<string | null>(null)
   let savingTabId: string | null = null
+  let externalPromptPath: string | null = null
   let filePath = $state<string | null>(null)
   let annotationPath = $state<string | null>(null)
   let text = $state('')
@@ -214,6 +216,7 @@
       revision,
       recoveryDigest: lastRecoveryDigest,
       selection: { anchor: selection.anchor, head: selection.head },
+      externalChangePaths: tabs.find((tab) => tab.id === activeTabId)?.externalChangePaths ?? [],
     }
     tabs = tabs.map((tab) => tab.id === activeTabId ? snapshot : tab)
   }
@@ -237,6 +240,7 @@
       revision,
       recoveryDigest: lastRecoveryDigest,
       selection: { anchor: selection.anchor, head: selection.head },
+      externalChangePaths: [],
     }
   }
 
@@ -286,6 +290,52 @@
     focusMode = tab.focusMode
     suppressEditorUpdate = false
     editor?.focus()
+    if (tab.externalChangePaths.length) void resolveExternalChanges(tab.externalChangePaths[0]!)
+  }
+
+  async function handleExternalChange(changedPath: string): Promise<void> {
+    const resolved = changedPath.toLocaleLowerCase('ru')
+    const affected = tabs.filter((tab) => [tab.path, tab.annotationPath]
+      .some((candidate) => candidate?.toLocaleLowerCase('ru') === resolved))
+    if (!affected.length) return
+    tabs = tabs.map((tab) => affected.some((item) => item.id === tab.id) && !tab.externalChangePaths.includes(changedPath)
+      ? { ...tab, externalChangePaths: [...tab.externalChangePaths, changedPath], status: 'Файл изменён вне приложения' }
+      : tab)
+    if (affected.some((tab) => tab.id === activeTabId)) await resolveExternalChanges(changedPath)
+  }
+
+  async function resolveExternalChanges(changedPath: string): Promise<void> {
+    if (externalPromptPath || !filePath) return
+    externalPromptPath = changedPath
+    const sourceName = changedPath.split(/[\\/]/).at(-1) ?? changedPath
+    const reload = window.confirm(`Файл «${sourceName}» изменён в другой программе.\n\nОК — перезагрузить документ и заменить несохранённые изменения.\nОтмена — оставить текущую версию открытой.`)
+    if (!reload) {
+      try {
+        await invoke('fs:watchAck', { path: changedPath })
+        tabs = tabs.map((tab) => tab.id === activeTabId
+          ? { ...tab, externalChangePaths: tab.externalChangePaths.filter((item) => item !== changedPath), status: 'Внешнее изменение оставлено без загрузки' }
+          : tab)
+        status = 'Внешнее изменение оставлено без загрузки'
+      } catch (error) {
+        status = `Не удалось подтвердить внешнее изменение: ${error instanceof Error ? error.message : String(error)}`
+      } finally {
+        externalPromptPath = null
+      }
+      return
+    }
+    try {
+      const result = await invoke<OpenedFile>('fs:read', { path: changedPath })
+      normalizeSource(result)
+      tabs = tabs.map((tab) => tab.id === activeTabId
+        ? { ...tab, externalChangePaths: tab.externalChangePaths.filter((item) => item !== changedPath) }
+        : tab)
+      captureActiveTab()
+      status = 'Документ перезагружен после внешнего изменения'
+    } catch (error) {
+      status = `Не удалось перезагрузить документ: ${error instanceof Error ? error.message : String(error)}`
+    } finally {
+      externalPromptPath = null
+    }
   }
 
   function switchToDocument(file: OpenedFile): void {
@@ -875,6 +925,9 @@
         status = `Не удалось обновить дерево: ${error instanceof Error ? error.message : String(error)}`
       })
     })
+    const unsubscribeFileChanged = window.annotator.onFileChanged(({ path: changedPath }) => {
+      void handleExternalChange(changedPath)
+    })
     const recoveryTimer = setInterval(() => {
       if (!dirty) return
       const snapshot = JSON.parse(JSON.stringify({
@@ -894,6 +947,7 @@
       window.removeEventListener('keydown', handleKeydown)
       unsubscribeOpen()
       unsubscribeWorkspace()
+      unsubscribeFileChanged()
       clearInterval(recoveryTimer)
       editor?.destroy()
       if (autosaveTimer) clearTimeout(autosaveTimer)

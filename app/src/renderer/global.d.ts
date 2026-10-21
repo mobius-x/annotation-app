@@ -7,6 +7,7 @@ declare global {
       invoke(channel: Channel, payload?: unknown): Promise<unknown>
       onOpenFile(callback: (file: OpenedFile) => void): () => void
       onWorkspaceRefresh(callback: () => void): () => void
+      onFileChanged(callback: (change: { path: string }) => void): () => void
     }
   }
 }

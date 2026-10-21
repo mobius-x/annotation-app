@@ -16,6 +16,8 @@ const currentDir = path.dirname(fileURLToPath(import.meta.url))
 const isDev = !app.isPackaged && Boolean(process.env.ELECTRON_RENDERER_URL)
 const allowedRoots = new Set<string>()
 const backupTimes = new Map<string, number>()
+const watchedFiles = new Map<string, ReturnType<typeof chokidar.watch>>()
+const fileDigests = new Map<string, string | null>()
 let mainWindow: BrowserWindow | null = null
 let folderWatcher: ReturnType<typeof chokidar.watch> | null = null
 
@@ -65,7 +67,51 @@ async function chooseDocument(): Promise<OpenedFile | null> {
   if (result.canceled || !result.filePaths[0]) return null
   const filePath = path.resolve(result.filePaths[0])
   allowedRoots.add(path.dirname(filePath))
-  return readDocument(filePath)
+  return openDocumentAndWatch(filePath)
+}
+
+function digest(buffer: Buffer): string {
+  return createHash('sha256').update(buffer).digest('hex')
+}
+
+async function currentDigest(filePath: string): Promise<string | null> {
+  try {
+    return digest(await fs.readFile(filePath))
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+    throw error
+  }
+}
+
+async function watchFile(filePath: string): Promise<void> {
+  const resolved = path.resolve(filePath)
+  if (!isAllowedPath(resolved) || watchedFiles.has(resolved)) return
+  fileDigests.set(resolved, await currentDigest(resolved))
+  const watcher = chokidar.watch(resolved, {
+    ignoreInitial: true,
+    awaitWriteFinish: { stabilityThreshold: 250, pollInterval: 100 },
+  })
+  watcher.on('all', async (event, changedPath) => {
+    if (!['add', 'change', 'unlink'].includes(event)) return
+    try {
+      const target = path.resolve(changedPath)
+      const nextDigest = await currentDigest(target)
+      if (fileDigests.get(target) === nextDigest) return
+      fileDigests.set(target, nextDigest)
+      mainWindow?.webContents.send('file:changed', { path: target })
+    } catch (error) {
+      console.error(`Не удалось проверить внешнее изменение файла ${changedPath}.`, error)
+    }
+  })
+  watcher.on('error', (error) => console.error(`Ошибка наблюдения за файлом ${resolved}.`, error))
+  watchedFiles.set(resolved, watcher)
+}
+
+async function openDocumentAndWatch(filePath: string): Promise<OpenedFile> {
+  const opened = await readDocument(filePath)
+  const paths = new Set([opened.path, opened.annotationPath].filter((item): item is string => Boolean(item)))
+  await Promise.all([...paths].map((item) => watchFile(item)))
+  return opened
 }
 
 function decodeBuffer(buffer: Buffer): Pick<OpenedFile, 'text' | 'encoding' | 'hasBom'> {
@@ -274,12 +320,19 @@ async function saveDocument(request: SaveRequest): Promise<SavedFile | null> {
     savedAnnotationPath = isNewSource
       ? annotatedPath(target)
       : request.annotationPath ?? annotatedPath(target)
-    if (isNewSource) await atomicWrite(target, Buffer.from(text, 'utf8'))
+    if (isNewSource) {
+      const sourceBytes = Buffer.from(text, 'utf8')
+      await atomicWrite(target, sourceBytes)
+      fileDigests.set(target, digest(sourceBytes))
+      await watchFile(target)
+    }
     await backupBeforeWrite(savedAnnotationPath)
     const bytes = /\.annot\.md$/i.test(savedAnnotationPath)
       ? Buffer.from(serializeMarkdownDocument(document, request.eol as '\n' | '\r\n' | '\r'), 'utf8')
       : Buffer.from(JSON.stringify(document, null, 2), 'utf8')
     await atomicWrite(savedAnnotationPath, bytes)
+    fileDigests.set(savedAnnotationPath, digest(bytes))
+    await watchFile(savedAnnotationPath)
   } else {
     const encoding = request.encoding === 'utf-16be' ? 'utf16-be' : request.encoding
     if (!iconv.encodingExists(encoding)) throw new Error(`Неизвестная кодировка: ${request.encoding}`)
@@ -292,6 +345,7 @@ async function saveDocument(request: SaveRequest): Promise<SavedFile | null> {
       contents = Buffer.concat([bom, contents])
     }
     await atomicWrite(target, contents)
+    fileDigests.set(target, digest(contents))
   }
   return { path: target, annotationPath: savedAnnotationPath }
 }
@@ -324,7 +378,12 @@ function registerIpc(): void {
     return { path: directory, entries: await listDirectory(directory) }
   })
   installHandler('fs:list', ({ path: directory }) => listDirectory(directory))
-  installHandler('fs:read', ({ path: filePath }) => readDocument(path.resolve(filePath)))
+  installHandler('fs:read', ({ path: filePath }) => openDocumentAndWatch(path.resolve(filePath)))
+  installHandler('fs:watchAck', async ({ path: filePath }) => {
+    const target = path.resolve(filePath)
+    if (!isAllowedPath(target)) throw new Error('Путь вне разрешённой рабочей области.')
+    fileDigests.set(target, await currentDigest(target))
+  })
   installHandler('fs:save', (payload) => saveDocument(payload as SaveRequest))
   installHandler('settings:get', () => readSettings())
   installHandler('settings:save', (settings) => writeSettings(settings))
@@ -426,7 +485,7 @@ if (!gotLock) {
     const documentPath = argv.find((argument) => /\.(txt|md)$/i.test(argument))
     if (documentPath && isAllowedPath(path.resolve(documentPath))) {
       allowedRoots.add(path.dirname(path.resolve(documentPath)))
-      void readDocument(path.resolve(documentPath)).then((document) => mainWindow?.webContents.send('file:open', document))
+      void openDocumentAndWatch(path.resolve(documentPath)).then((document) => mainWindow?.webContents.send('file:open', document))
     }
     mainWindow?.show()
     mainWindow?.focus()
@@ -450,5 +509,7 @@ if (!gotLock) {
 }
 
 app.on('window-all-closed', () => {
+  for (const watcher of watchedFiles.values()) void watcher.close()
+  watchedFiles.clear()
   if (process.platform !== 'darwin') app.quit()
 })
