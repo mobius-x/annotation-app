@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { contrastRatio, defaultSettings, parseShortcut, resolveTheme, settingsSchema, themeSchema, themes } from './settings'
+import { contrastRatio, defaultSettings, getAnnotationMarkerColor, parseShortcut, resolveTheme, settingsSchema, themeSchema, themes } from './settings'
 
 function blend(foreground: string, background: string, alpha: number): string {
   const channels = [1, 3, 5].map((offset) => {
@@ -83,6 +83,31 @@ describe('application settings', () => {
         if (normalContrast < 4.5) violations.push(`${themeId}/${id} default ${normalContrast.toFixed(2)}:1`)
         if (activeContrast < 3) violations.push(`${themeId}/${id} active ${activeContrast.toFixed(2)}:1`)
       }
+    }
+    expect(violations).toEqual([])
+  })
+
+  it('keeps annotation type markers and resolved indicators distinct from card backgrounds', () => {
+    const ids = ['comment', 'note', 'question', 'idea', 'todo', 'important']
+    const violations: string[] = []
+    for (const themeId of Object.keys(themes)) {
+      const palette = resolveTheme(themeId)
+      const backgrounds = {
+        card: palette.colors['ui.bgAlt']!,
+        hover: palette.colors['ui.hover']!,
+        selected: palette.colors['ui.selectedRow']!,
+      }
+      for (const id of ids) {
+        const markerColor = getAnnotationMarkerColor(palette, id)
+        for (const [state, background] of Object.entries(backgrounds)) {
+          const contrast = contrastRatio(markerColor, background)
+          if (contrast < 3) violations.push(`${themeId}/${id} ${state} ${contrast.toFixed(2)}:1`)
+        }
+      }
+      expect(
+        contrastRatio(palette.colors['editor.fg']!, palette.colors['ui.bgAlt']!),
+        `${themeId}: resolved indicator contrast`,
+      ).toBeGreaterThanOrEqual(4.5)
     }
     expect(violations).toEqual([])
   })

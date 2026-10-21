@@ -133,6 +133,8 @@ export interface ThemePalette {
   colors: Record<string, string>
 }
 
+const annotationTypeIds = ['comment', 'note', 'question', 'idea', 'todo', 'important'] as const
+
 export const themes: Record<string, ThemePalette> = {
   dracula: {
     kind: 'dark',
@@ -215,7 +217,7 @@ for (const theme of Object.values(themes)) {
   const text = theme.colors['editor.fg']!
   const alpha = defaultSettings.annotations.highlightAlpha
   const activeAlpha = Math.max(alpha, Math.min(alpha + 0.12, 0.35))
-  for (const id of ['comment', 'note', 'question', 'idea', 'todo', 'important']) {
+  for (const id of annotationTypeIds) {
     const key = `annot.${id}`
     const original = theme.colors[key]!
     for (let step = 0; step <= 100; step += 1) {
@@ -293,6 +295,7 @@ export function resolveTheme(themeId: string, overrides: Record<string, string> 
       ? '#000000'
       : '#ffffff'
   }
+
   colors['editor.caret'] ??= colors['editor.fg']!
   colors['editor.lineHighlight'] ??= colors['editor.selection']!
   colors['editor.gutterFg'] ??= colors['ui.fgMuted']!
@@ -305,6 +308,27 @@ export function resolveTheme(themeId: string, overrides: Record<string, string> 
     kind: theme.kind,
     colors: { ...colors, ...overrides },
   }
+}
+
+export function getAnnotationMarkerColor(palette: ThemePalette, typeId: string): string {
+  const color = palette.colors[`annot.${typeId}`] ?? palette.colors['annot.default']!
+  const markerBackgrounds = [
+    palette.colors['ui.bgAlt'] ?? palette.colors['editor.bg']!,
+    palette.colors['ui.hover'] ?? palette.colors['editor.selection']!,
+    palette.colors['ui.selectedRow'] ?? palette.colors['editor.selection']!,
+  ]
+  const minContrast = (candidate: string) => Math.min(
+    ...markerBackgrounds.map((background) => contrastRatio(candidate, background)),
+  )
+  if (minContrast(color) >= 3) return color
+  const blackContrast = minContrast('#000000')
+  const whiteContrast = minContrast('#ffffff')
+  const endpoint = blackContrast > whiteContrast ? '#000000' : '#ffffff'
+  for (let step = 1; step <= 100; step += 1) {
+    const candidate = interpolateColor(color, endpoint, step / 100)
+    if (minContrast(candidate) >= 3) return candidate
+  }
+  return endpoint
 }
 
 export function parseShortcut(shortcut: string): string[] {
