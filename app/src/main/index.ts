@@ -10,6 +10,7 @@ import iconv from 'iconv-lite'
 import { channelNames, channelSchemas, type Channel } from '../shared/ipc-contract'
 import { defaultSettings, settingsSchema, themes } from '../shared/settings'
 import { parseMarkdownDocument, serializeMarkdownDocument } from '../shared/markdown-format'
+import { detectLineEnding } from '../shared/text-format'
 import type { AnnotatedDocument, ApplyTextRequest, FileEntry, OpenedFile, RecoverySnapshot, SaveRequest, SavedFile } from '../shared/model'
 
 const currentDir = path.dirname(fileURLToPath(import.meta.url))
@@ -168,9 +169,9 @@ async function readDocument(filePath: string, annotationChoice?: string): Promis
     const sourceExists = Boolean(source && await exists(basePath))
     const sourceBytes = sourceExists ? await fs.readFile(basePath) : null
     const sourceDecoded = sourceBytes ? decodeBuffer(sourceBytes) : null
-    const sourceEol = sourceDecoded
-      ? sourceDecoded.text.includes('\r\n') ? '\r\n' : sourceDecoded.text.includes('\r') ? '\r' : '\n'
-      : annotationDocument.document?.eol === 'crlf' ? '\r\n' : annotationDocument.document?.eol === 'cr' ? '\r' : '\n'
+    const sourceLineEndings = sourceDecoded ? detectLineEnding(sourceDecoded.text) : null
+    const sourceEol = sourceLineEndings?.eol
+      ?? (annotationDocument.document?.eol === 'crlf' ? '\r\n' : annotationDocument.document?.eol === 'cr' ? '\r' : '\n')
     return {
       path: source ? basePath : filePath,
       text: annotationDocument.text,
@@ -178,13 +179,15 @@ async function readDocument(filePath: string, annotationChoice?: string): Promis
       eol: sourceEol,
       hasBom: sourceDecoded?.hasBom ?? false,
       originalText: sourceDecoded ? sourceDecoded.text.replace(/\r\n?|\n/g, '\n') : null,
+      mixedEol: sourceLineEndings?.mixed ?? false,
       annotationDocument,
       annotationPath: filePath,
     }
   }
   const bytes = await fs.readFile(filePath)
   const decoded = decodeBuffer(bytes)
-  const eol = decoded.text.includes('\r\n') ? '\r\n' : decoded.text.includes('\r') ? '\r' : '\n'
+  const lineEndings = detectLineEnding(decoded.text)
+  const eol = lineEndings.eol
   const text = decoded.text.replace(/\r\n?|\n/g, '\n')
   const jsonPath = annotatedPath(filePath)
   const markdownPath = annotatedPath(filePath, 'md')
@@ -202,11 +205,12 @@ async function readDocument(filePath: string, annotationChoice?: string): Promis
       eol,
       text: annotationDocument.text,
       originalText: text,
+      mixedEol: lineEndings.mixed,
       annotationDocument,
       annotationPath,
     }
   }
-  return { path: filePath, ...decoded, eol, text, originalText: text, annotationPath }
+  return { path: filePath, ...decoded, eol, text, originalText: text, mixedEol: lineEndings.mixed, annotationPath }
 }
 
 async function readSourceText(filePath: string): Promise<string> {

@@ -59,6 +59,7 @@ export interface OpenedFile {
   eol: '\n' | '\r\n' | '\r'
   hasBom: boolean
   originalText?: string | null
+  mixedEol?: boolean
   annotationDocument?: unknown
   annotationPath?: string | null
 }

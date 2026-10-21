@@ -444,6 +444,7 @@
         loadMessage = error instanceof Error ? error.message : String(error)
       }
     }
+    if (file.mixedEol) loadMessage += ' · файл содержал смешанные переводы строк; при сохранении используется преобладающий стиль'
     dirty = false
     selectedId = null
     if (editor) {
