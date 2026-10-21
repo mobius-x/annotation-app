@@ -11,6 +11,7 @@
   import type { Annotation, AnnotatedDocument, FileEntry, OpenedFile, RecoverySnapshot, SavedFile } from '../shared/model'
   import { annotationField, annotationHistory, focusDecorations, focusViewField, setAnnotationRanges, setFocusView } from './editor/annotation-field'
   import { createLineStarts, createOutlineRows } from './editor/outline'
+  import { parseTags } from './editor/annotation-tags'
   import { createAnnotatedDocument, parseAnnotatedDocument, restoreAnnotations } from './format/json-format'
 
   interface DocumentTab {
@@ -55,6 +56,9 @@
   let noteDraft = $state('')
   let noteType = $state('comment')
   let query = $state('')
+  let filterType = $state('all')
+  let hideResolved = $state(false)
+  let tagDrafts = $state<Record<string, string>>({})
   let showOrphans = $state(true)
   let focusMode = $state(false)
   const focusCompartment = new Compartment()
@@ -89,7 +93,9 @@
 
   const visibleAnnotations = $derived(
     [...annotations]
-      .filter((annotation) => !query || `${annotation.text} ${annotation.quote} ${annotation.tags.join(' ')}`.toLocaleLowerCase('ru').includes(query.toLocaleLowerCase('ru')))
+      .filter((annotation) => filterType === 'all' || annotation.type === filterType)
+      .filter((annotation) => !hideResolved || !annotation.resolved)
+      .filter((annotation) => !query || `${annotation.type} ${annotation.text} ${annotation.quote} ${annotation.tags.join(' ')}`.toLocaleLowerCase('ru').includes(query.toLocaleLowerCase('ru')))
       .sort((left, right) => Number(Boolean(left.orphan)) - Number(Boolean(right.orphan)) || left.start - right.start || right.end - left.end),
   )
   const visibleLinkedAnnotations = $derived(visibleAnnotations.filter((annotation) => !annotation.orphan))
@@ -582,6 +588,32 @@
     markDirty()
   }
 
+  function commitTags(id: string): void {
+    const annotation = annotations.find((item) => item.id === id)
+    if (!annotation) return
+    const tags = parseTags(tagDrafts[id] ?? '', annotation.tags)
+    updateAnnotation(id, { tags })
+    tagDrafts = { ...tagDrafts, [id]: '' }
+  }
+
+  function handleAnnotationListKeydown(event: KeyboardEvent): void {
+    if (event.target instanceof HTMLElement && event.target.closest('input, textarea, select, button')) return
+    const annotation = annotations.find((item) => item.id === selectedId)
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault()
+      moveAnnotation(event.key === 'ArrowDown' ? 1 : -1)
+    } else if (event.key === 'Enter' && annotation) {
+      event.preventDefault()
+      editNoteId = annotation.id
+    } else if (event.key === 'Delete' && annotation) {
+      event.preventDefault()
+      removeAnnotation(annotation.id)
+    } else if (event.key === ' ' && annotation) {
+      event.preventDefault()
+      updateAnnotation(annotation.id, { resolved: !annotation.resolved }, true)
+    }
+  }
+
   function selectAnnotation(annotation: Annotation): void {
     selectedId = annotation.id
     const view = editor
@@ -940,6 +972,13 @@
       <aside class="annotations pane">
         <div class="pane-heading"><span>АННОТАЦИИ</span><span class="count-badge">{annotations.length}</span></div>
         <input class="search-input" bind:value={query} placeholder="Поиск по заметкам и тегам" aria-label="Поиск по аннотациям" />
+        <div class="annotation-filters">
+          <select bind:value={filterType} aria-label="Фильтр по типу аннотации">
+            <option value="all">Все типы</option>
+            {#each annotationTypes as type}<option value={type.id}>{type.label}</option>{/each}
+          </select>
+          <label><input type="checkbox" bind:checked={hideResolved} /> Скрыть решённые</label>
+        </div>
         {#if pendingSelection.from !== pendingSelection.to}
           <section class="note-composer">
             <div class="composer-title">Новая аннотация</div>
@@ -972,7 +1011,7 @@
             {/if}
           </section>
         {/if}
-        <div class="annotation-list" role="listbox" aria-label="Список аннотаций">
+        <div class="annotation-list" role="listbox" aria-label="Список аннотаций" tabindex="0" onkeydown={handleAnnotationListKeydown}>
           {#if visibleLinkedAnnotations.length === 0}
             <div class="empty-hint annotation-empty"><span class="empty-icon">✳</span><p>{annotations.length ? 'Совпадений не найдено.' : 'Выделите фрагмент текста и нажмите «＋ Аннотация», чтобы добавить заметку.'}</p></div>
           {/if}
@@ -994,6 +1033,16 @@
                 <textarea class="annotation-body" aria-label="Текст заметки" rows="3" value={annotation.text} oninput={(event) => updateAnnotation(annotation.id, { text: event.currentTarget.value })} onkeydown={(event) => { if (event.key === 'Escape') editNoteId = null }} onblur={() => editNoteId = null} placeholder="Текст заметки в Markdown…"></textarea>
               {/if}
               {#if annotation.tags.length}<div class="tag-row">{#each annotation.tags as tag}<span>#{tag}</span>{/each}</div>{/if}
+              <div class="tag-editor">
+                <input
+                  aria-label="Добавить тег к аннотации"
+                  placeholder="Добавить тег…"
+                  value={tagDrafts[annotation.id] ?? ''}
+                  oninput={(event) => tagDrafts = { ...tagDrafts, [annotation.id]: event.currentTarget.value }}
+                  onkeydown={(event) => { if (event.key === 'Enter') { event.preventDefault(); commitTags(annotation.id) } }}
+                  onblur={() => { if (tagDrafts[annotation.id]?.trim()) commitTags(annotation.id) }}
+                />
+              </div>
             </article>
           {/each}
         </div>
