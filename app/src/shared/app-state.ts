@@ -6,12 +6,14 @@ export const appLayoutSchema = z.object({
   showExplorer: z.boolean().default(true),
   showAnnotations: z.boolean().default(true),
   showOutline: z.boolean().default(true),
+  outlineHeight: z.number().int().min(130).max(1200).default(230),
 }).catch({
   explorerWidth: 250,
   annotationsWidth: 340,
   showExplorer: true,
   showAnnotations: true,
   showOutline: true,
+  outlineHeight: 230,
 })
 
 export const appStateSchema = z.object({
@@ -19,13 +21,13 @@ export const appStateSchema = z.object({
   folders: z.array(z.string()).default([]),
   openTabs: z.array(z.string()).default([]),
   activeTab: z.number().int().nonnegative().default(0),
-  lastWorkspace: z.string().nullable().default(null),
   layout: appLayoutSchema.default({
     explorerWidth: 250,
     annotationsWidth: 340,
     showExplorer: true,
     showAnnotations: true,
     showOutline: true,
+    outlineHeight: 230,
   }),
 })
 

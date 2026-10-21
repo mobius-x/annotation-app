@@ -4,13 +4,11 @@ import type { Channel } from '../shared/ipc-contract'
 const channelNames: Channel[] = [
   'dialog:openFile',
   'dialog:openFolder',
-  'dialog:openWorkspace',
   'dialog:chooseEncoding',
   'dialog:importInterchange',
   'dialog:saveExport',
   'state:get',
   'state:save',
-  'dialog:saveWorkspace',
   'fs:list',
   'fs:create',
   'fs:rename',
@@ -51,20 +49,20 @@ const api = {
     ipcRenderer.on('file:open', listener)
     return () => ipcRenderer.removeListener('file:open', listener)
   },
-  onWorkspaceRefresh(callback: () => void): () => void {
+  onTreeRefresh(callback: () => void): () => void {
     const listener = () => callback()
-    ipcRenderer.on('workspace:refresh', listener)
-    return () => ipcRenderer.removeListener('workspace:refresh', listener)
+    ipcRenderer.on('tree:refresh', listener)
+    return () => ipcRenderer.removeListener('tree:refresh', listener)
   },
   onEntryRenamed(callback: (change: { oldPath: string; newPath: string; sidecars: Array<{ oldPath: string; newPath: string }> }) => void): () => void {
     const listener = (_event: Electron.IpcRendererEvent, change: { oldPath: string; newPath: string; sidecars: Array<{ oldPath: string; newPath: string }> }) => callback(change)
-    ipcRenderer.on('workspace:entryRenamed', listener)
-    return () => ipcRenderer.removeListener('workspace:entryRenamed', listener)
+    ipcRenderer.on('tree:entryRenamed', listener)
+    return () => ipcRenderer.removeListener('tree:entryRenamed', listener)
   },
   onEntriesTransferred(callback: (change: { pairs: Array<{ source: string; target: string }>; copy: boolean }) => void): () => void {
     const listener = (_event: Electron.IpcRendererEvent, change: { pairs: Array<{ source: string; target: string }>; copy: boolean }) => callback(change)
-    ipcRenderer.on('workspace:entriesTransferred', listener)
-    return () => ipcRenderer.removeListener('workspace:entriesTransferred', listener)
+    ipcRenderer.on('tree:entriesTransferred', listener)
+    return () => ipcRenderer.removeListener('tree:entriesTransferred', listener)
   },
   onFileChanged(callback: (change: { path: string }) => void): () => void {
     const listener = (_event: Electron.IpcRendererEvent, change: { path: string }) => callback(change)

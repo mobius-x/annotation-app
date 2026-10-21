@@ -68,13 +68,13 @@
       const result = await invoke<{ state: AppState; error: string | null }>('state:get')
       const state = result.state
       folders = state.folders
-      lastWorkspaceFile = state.lastWorkspace
       explorerWidth = state.layout.explorerWidth
       annotationWidth = state.layout.annotationsWidth
       showExplorer = state.layout.showExplorer
       showAnnotations = state.layout.showAnnotations
       showOutline = state.layout.showOutline
-      if (folders.length) await refreshWorkspace()
+      outlinePaneHeight = state.layout.outlineHeight
+      if (folders.length) await refreshFileTree()
       const restoredTabs = new Map<number, string>()
       for (const [index, tabPath] of state.openTabs.entries()) {
         try {
@@ -126,7 +126,6 @@
   let folderNames = $state<Record<string, string>>({})
   let rootEntries = $state<Record<string, FileEntry[]>>({})
   let rootErrors = $state<Record<string, string>>({})
-  let lastWorkspaceFile = $state<string | null>(null)
   let expanded = $state(new Set<string>())
   let children = $state<Record<string, FileEntry[]>>({})
   let selectedEntryPath = $state<string | null>(null)
@@ -177,6 +176,8 @@
   let annotationsRenderedWidth = $state(340)
   let paneResize: { side: 'explorer' | 'annotations'; startX: number; startWidth: number } | null = null
   let showOutline = $state(true)
+  let outlinePaneHeight = $state(230)
+  let outlineResize: { startY: number; startHeight: number; maxHeight: number } | null = null
   let outlineListHost = $state<HTMLDivElement>()
   let outlineScrollTop = $state(0)
   let outlineHeight = $state(200)
@@ -248,6 +249,49 @@
         node.removeEventListener('pointermove', pointerMove)
         node.removeEventListener('pointerup', pointerUp)
         node.removeEventListener('pointercancel', pointerUp)
+        node.removeEventListener('keydown', keyDown)
+      },
+    }
+  }
+
+  function resizeOutline(event: PointerEvent): void {
+    if (!outlineResize) return
+    const delta = outlineResize.startY - event.clientY
+    outlinePaneHeight = Math.max(130, Math.min(outlineResize.maxHeight, outlineResize.startHeight + delta))
+  }
+
+  function resizableOutline(node: HTMLElement) {
+    const pointerDown = (event: PointerEvent) => {
+      if (event.button !== 0) return
+      const paneHeight = node.parentElement?.clientHeight ?? 600
+      outlineResize = {
+        startY: event.clientY,
+        startHeight: outlinePaneHeight,
+        maxHeight: Math.max(130, paneHeight - 190),
+      }
+      node.setPointerCapture(event.pointerId)
+      event.preventDefault()
+    }
+    const pointerMove = (event: PointerEvent) => resizeOutline(event)
+    const finish = () => { outlineResize = null }
+    const keyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return
+      event.preventDefault()
+      const maxHeight = Math.max(130, (node.parentElement?.clientHeight ?? 600) - 190)
+      const delta = event.key === 'ArrowUp' ? 16 : -16
+      outlinePaneHeight = Math.max(130, Math.min(maxHeight, outlinePaneHeight + delta))
+    }
+    node.addEventListener('pointerdown', pointerDown)
+    node.addEventListener('pointermove', pointerMove)
+    node.addEventListener('pointerup', finish)
+    node.addEventListener('pointercancel', finish)
+    node.addEventListener('keydown', keyDown)
+    return {
+      destroy() {
+        node.removeEventListener('pointerdown', pointerDown)
+        node.removeEventListener('pointermove', pointerMove)
+        node.removeEventListener('pointerup', finish)
+        node.removeEventListener('pointercancel', finish)
         node.removeEventListener('keydown', keyDown)
       },
     }
@@ -789,7 +833,7 @@
           await invoke('fs:undo')
           selectedEntryPaths = []
           selectedEntryPath = null
-          await refreshWorkspace()
+          await refreshFileTree()
           status = 'Последняя файловая операция отменена'
         }
         break
@@ -1270,7 +1314,6 @@
         ? await invoke<OpenedFile | null>('fs:read', { path, ...(encodingOverride ? { encoding: encodingOverride } : {}) })
         : await invoke<OpenedFile | null>('dialog:openFile')
       if (!result) return
-      lastWorkspaceFile = result.path
       switchToDocument(result)
     } catch (error) {
       status = `Не удалось открыть файл: ${error instanceof Error ? error.message : String(error)}`
@@ -1302,7 +1345,6 @@
       if (!result) return
       if (!add) {
         folders = []
-        lastWorkspaceFile = null
         folderNames = {}
         rootEntries = {}
         rootErrors = {}
@@ -1320,81 +1362,6 @@
       status = `Рабочая область: ${folders.length} корней`
     } catch (error) {
       status = `Не удалось открыть папку: ${error instanceof Error ? error.message : String(error)}`
-    }
-  }
-
-  async function openWorkspace(): Promise<void> {
-    try {
-      const result = await invoke<{
-        path: string
-        folders: Array<{ path: string; name?: string; entries: FileEntry[]; error: string | null }>
-        openTabs: string[]
-        activeTab: number
-        settings?: Record<string, unknown>
-      } | null>('dialog:openWorkspace')
-      if (!result) return
-      folders = result.folders.map((root) => root.path)
-      folderNames = Object.fromEntries(result.folders.flatMap((root) => root.name ? [[root.path, root.name]] : []))
-      rootEntries = Object.fromEntries(result.folders.map((root) => [root.path, root.entries]))
-      rootErrors = Object.fromEntries(result.folders.flatMap((root) => root.error ? [[root.path, root.error]] : []))
-      children = {}
-      expanded = new Set()
-      if (result.settings) {
-        const editorOverrides = result.settings.editor && typeof result.settings.editor === 'object' && !Array.isArray(result.settings.editor)
-          ? result.settings.editor
-          : {}
-        settings = settingsSchema.parse({
-          ...settings,
-          ...result.settings,
-          editor: { ...settings.editor, ...editorOverrides },
-        })
-        applyTheme()
-      }
-      const restoredTabs = new Map<number, string>()
-      let restoreErrors = 0
-      for (const [index, tabPath] of result.openTabs.entries()) {
-        try {
-          const opened = await invoke<OpenedFile>('fs:read', { path: tabPath })
-          switchToDocument(opened)
-          restoredTabs.set(index, tabPath)
-        } catch (error) {
-          restoreErrors += 1
-          status = `Не удалось восстановить вкладку «${tabPath.split(/[\\/]/).at(-1)}»: ${error instanceof Error ? error.message : String(error)}`
-        }
-      }
-      const activePath = restoredTabs.get(result.activeTab)
-      if (activePath) {
-        const active = tabs.find((tab) => tab.path === activePath)
-        if (active) activateTab(active.id)
-      }
-      status = restoreErrors
-        ? `Workspace открыт; не удалось восстановить вкладок: ${restoreErrors}`
-        : `Workspace открыт: ${result.path}`
-    } catch (error) {
-      status = `Не удалось открыть workspace: ${error instanceof Error ? error.message : String(error)}`
-    }
-  }
-
-  async function saveWorkspace(): Promise<void> {
-    if (!folders.length) {
-      status = 'Сначала добавьте папку в рабочую область.'
-      return
-    }
-    const openTabs = tabs.flatMap((tab) => tab.path ? [tab.path] : [])
-    const activeTab = filePath ? openTabs.indexOf(filePath) : 0
-    try {
-      const result = await invoke<string | null>('dialog:saveWorkspace', {
-        folders,
-        openTabs,
-        activeTab: Math.max(0, activeTab),
-        settings: { theme: settings.theme, editor: settings.editor },
-      })
-      if (result) {
-        lastWorkspaceFile = result
-        status = `Workspace сохранён: ${result}`
-      }
-    } catch (error) {
-      status = `Не удалось сохранить workspace: ${error instanceof Error ? error.message : String(error)}`
     }
   }
 
@@ -1507,14 +1474,14 @@
       const movedPaths = result.filter((pair) => !pair.source.toLowerCase().endsWith('.annot.json') && !pair.source.toLowerCase().endsWith('.annot.md'))
       selectedEntryPaths = movedPaths.map((pair) => pair.target)
       selectedEntryPath = selectedEntryPaths.at(-1) ?? null
-      await refreshWorkspace()
+      await refreshFileTree()
       status = `${copy ? 'Скопировано' : 'Перемещено'} элементов: ${movedPaths.length}`
     } catch (error) {
       status = `Не удалось выполнить перенос: ${error instanceof Error ? error.message : String(error)}`
     }
   }
 
-  async function refreshWorkspace(): Promise<void> {
+  async function refreshFileTree(): Promise<void> {
     if (!folders.length) return
     const roots = await Promise.all(folders.map(async (root) => {
       try {
@@ -1609,7 +1576,7 @@
         expanded = nextExpanded
       }
       treeEdit = null
-      await refreshWorkspace()
+      await refreshFileTree()
       status = edit.action === 'rename' ? 'Элемент переименован' : 'Элемент создан'
     } catch (error) {
       status = `Не удалось выполнить файловую операцию: ${error instanceof Error ? error.message : String(error)}`
@@ -1645,7 +1612,7 @@
       }
       selectedEntryPath = null
       selectedEntryPaths = []
-      await refreshWorkspace()
+      await refreshFileTree()
       status = 'Элемент перемещён в корзину'
     } catch (error) {
       status = `Не удалось удалить элемент: ${error instanceof Error ? error.message : String(error)}`
@@ -1894,7 +1861,7 @@
         await invoke('recovery:delete', { path: savedFromPath })
         if (savedFromPath !== filePath) await invoke('recovery:delete', { path: filePath })
       }
-      if (folders.length) await refreshWorkspace()
+      if (folders.length) await refreshFileTree()
       captureActiveTab()
     } catch (error) {
       status = `Ошибка сохранения: ${error instanceof Error ? error.message : String(error)}`
@@ -2298,8 +2265,8 @@
       if (settings.themeFollowSystem.enabled) applyTheme()
     })
     const unsubscribeOpen = window.annotator.onOpenFile(normalizeSource)
-    const unsubscribeWorkspace = window.annotator.onWorkspaceRefresh(() => {
-      void refreshWorkspace()
+    const unsubscribeTree = window.annotator.onTreeRefresh(() => {
+      void refreshFileTree()
     })
     const unsubscribeEntryRenamed = window.annotator.onEntryRenamed((change) => {
       const renamedPaths = new Map([[change.oldPath, change.newPath], ...change.sidecars.map((sidecar) => [sidecar.oldPath, sidecar.newPath] as [string, string])])
@@ -2367,7 +2334,7 @@
       window.removeEventListener('wheel', handleWheel)
       unsubscribeSystemTheme()
       unsubscribeOpen()
-      unsubscribeWorkspace()
+      unsubscribeTree()
       unsubscribeEntryRenamed()
       unsubscribeEntriesTransferred()
       unsubscribeFileChanged()
@@ -2429,8 +2396,7 @@
       folders: [...folders],
       openTabs: openDocumentTabs.flatMap((tab) => tab.path ? [tab.path] : []),
       activeTab,
-      lastWorkspace: lastWorkspaceFile,
-      layout: { explorerWidth, annotationsWidth: annotationWidth, showExplorer, showAnnotations, showOutline },
+      layout: { explorerWidth, annotationsWidth: annotationWidth, showExplorer, showAnnotations, showOutline, outlineHeight: outlinePaneHeight },
     }
     if (appStateTimer) clearTimeout(appStateTimer)
     appStateTimer = setTimeout(() => {
@@ -2466,9 +2432,6 @@
       </button>
       <button class="bar-button" onclick={() => void openFolder()} title="Открыть рабочую папку" aria-label="Открыть рабочую папку">
         <Icon name="folder-open" size={17} /><span class="bar-label">Папка</span>
-      </button>
-      <button class="bar-button" onclick={() => void openWorkspace()} title="Открыть workspace" aria-label="Открыть workspace">
-        <Icon name="layers" size={17} /><span class="bar-label">Workspace</span>
       </button>
       <button class="bar-button" onclick={() => void importInterchange()} title="Импортировать файл с аннотациями" aria-label="Импортировать файл с аннотациями">
         <Icon name="file-text" size={17} /><span class="bar-label">Импорт</span>
@@ -2536,10 +2499,6 @@
 
         {#if treeMenu && folders.length}
           <div class="tree-context-menu menu-surface" role="menu" aria-label="Операции с файлами">
-            <button role="menuitem" onclick={() => { treeMenu = false; void saveWorkspace() }}>
-              <Icon name="save" size={14} /><span>Сохранить workspace</span>
-            </button>
-            <span class="menu-separator" role="separator"></span>
             <button role="menuitem" onclick={() => beginTreeEdit('create-file')}>
               <Icon name="file-plus" size={14} /><span>Новый текстовый файл</span>
             </button>
@@ -2607,9 +2566,6 @@
             <button class="mini-button" onclick={() => void openFile()} title="Открыть отдельный файл">
               <Icon name="file-plus" size={14} /><span>Открыть файл</span>
             </button>
-            <button class="mini-button" onclick={() => void saveWorkspace()} title="Сохранить workspace">
-              <Icon name="save" size={14} /><span>Сохранить</span>
-            </button>
           </div>
         {:else}
           <div class="explorer-empty">
@@ -2620,13 +2576,25 @@
             <p class="empty-title">Документы под рукой</p>
             <p class="empty-copy">Откройте папку — файлы появятся здесь с отметками аннотированных глав.</p>
             <button class="accent-button" onclick={() => void openFolder()}>Открыть папку</button>
-            <button class="ghost-button" onclick={() => void openWorkspace()}>
-              <Icon name="layers" size={14} /><span>Открыть workspace</span>
-            </button>
           </div>
         {/if}
 
-        <section class:collapsed={!showOutline} class="outline-pane" aria-label="Структура аннотаций">
+        {#if showOutline}
+          <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+          <div
+            class="outline-resizer"
+            role="separator"
+            aria-orientation="horizontal"
+            aria-label="Высота панели структуры"
+            aria-valuemin="130"
+            aria-valuemax={Math.max(130, (outlineListHost?.closest('.explorer')?.clientHeight ?? 600) - 190)}
+            aria-valuenow={outlinePaneHeight}
+            aria-valuetext={`${outlinePaneHeight} пикселей`}
+            tabindex="0"
+            use:resizableOutline
+          ></div>
+        {/if}
+        <section class:collapsed={!showOutline} class="outline-pane" style:flex-basis="{outlinePaneHeight}px" aria-label="Структура аннотаций">
           <div class="outline-heading">
             <button class="outline-toggle" aria-expanded={showOutline} title={showOutline ? 'Свернуть навигатор' : 'Развернуть навигатор'} onclick={() => showOutline = !showOutline}>
               <Icon name={showOutline ? 'chevron-down' : 'chevron-right'} size={14} />

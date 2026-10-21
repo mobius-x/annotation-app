@@ -565,14 +565,38 @@ kbd {
 .outline-pane {
   display: flex;
   flex-direction: column;
-  flex: 0 1 230px;
+  flex: 0 1 auto;
   min-height: 130px;
-  max-height: 42%;
+  max-height: none;
   border-top: 1px solid var(--border);
   background: var(--ui-bg);
 }
 
 .outline-pane.collapsed { flex: 0 0 auto; min-height: 38px; max-height: none; }
+
+.outline-resizer {
+  position: relative;
+  z-index: 3;
+  flex: 0 0 6px;
+  width: 100%;
+  height: 6px;
+  margin-block: -3px;
+  background: transparent;
+  cursor: row-resize;
+  touch-action: none;
+}
+
+.outline-resizer::after {
+  content: "";
+  position: absolute;
+  inset: 2px 0;
+  background: var(--border);
+  transition: background-color 120ms var(--ease);
+}
+
+.outline-resizer:hover::after,
+.outline-resizer:focus-visible::after,
+.outline-resizer:active::after { background: var(--accent); }
 
 .outline-heading {
   display: flex;

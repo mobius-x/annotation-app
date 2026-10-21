@@ -12,7 +12,6 @@ import { parseMarkdownDocument, serializeMarkdownDocument } from '../shared/mark
 import { parseAnnotatedDocument } from '../renderer/format/json-format'
 import { detectLineEnding } from '../shared/text-format'
 import { isPathWithin, uniqueTransferName, validateFileEntryName } from '../shared/file-operations'
-import { parseWorkspaceFile, serializeWorkspaceFile, workspacePathFromFile } from '../shared/workspace-format'
 import { appStateSchema, type AppState } from '../shared/app-state'
 import { decodeTextBuffer as decodeBuffer, encodeTextBuffer } from '../shared/text-encoding'
 import { loadSelectedInterchange, saveSelectedExport } from './interchange-io'
@@ -448,8 +447,8 @@ async function renameEntry(sourcePath: string, requestedName: string): Promise<{
     sidecarOriginals: destinationSidecars.flatMap(({ newPath, originalContents }) => originalContents ? [{ path: newPath, contents: originalContents }] : []),
   })
   await Promise.all(movedWatchPaths.map((item) => watchFile(item.newPath)))
-  mainWindow?.webContents.send('workspace:refresh')
-  mainWindow?.webContents.send('workspace:entryRenamed', {
+  mainWindow?.webContents.send('tree:refresh')
+  mainWindow?.webContents.send('tree:entryRenamed', {
     oldPath: source,
     newPath: target,
     sidecars: destinationSidecars.map(({ oldPath, newPath }) => ({ oldPath, newPath })),
@@ -487,7 +486,7 @@ async function deleteEntry(targetPath: string, includeSidecars: boolean): Promis
     for (const sidecar of existingSidecars) await shell.trashItem(sidecar)
   } finally {
     await Promise.all(closedWatchers.filter((watchedTarget) => existsSync(watchedTarget)).map((watchedTarget) => watchFile(watchedTarget)))
-    mainWindow?.webContents.send('workspace:refresh')
+    mainWindow?.webContents.send('tree:refresh')
   }
 }
 
@@ -792,8 +791,8 @@ async function transferEntries(paths: string[], destination: string, copy: boole
         if (pairs.length) {
           await captureTargetDigests()
           recordUndo({ kind: 'transfer', copy, pairs, sidecarOriginals, replacements: replacementBackups, targetDigests })
-          mainWindow?.webContents.send('workspace:entriesTransferred', { pairs, copy })
-          mainWindow?.webContents.send('workspace:refresh')
+          mainWindow?.webContents.send('tree:entriesTransferred', { pairs, copy })
+          mainWindow?.webContents.send('tree:refresh')
           throw new Error(`Выполнено частично: завершённые элементы доступны одной операцией отмены. ${error instanceof Error ? error.message : String(error)}`)
         }
         throw error
@@ -801,8 +800,8 @@ async function transferEntries(paths: string[], destination: string, copy: boole
     }
     await captureTargetDigests()
     recordUndo({ kind: 'transfer', copy, pairs, sidecarOriginals, replacements: replacementBackups, targetDigests })
-    mainWindow?.webContents.send('workspace:entriesTransferred', { pairs, copy })
-    mainWindow?.webContents.send('workspace:refresh')
+    mainWindow?.webContents.send('tree:entriesTransferred', { pairs, copy })
+    mainWindow?.webContents.send('tree:refresh')
     return pairs
   }
 
@@ -896,18 +895,18 @@ async function undoFileOperation(): Promise<void> {
     undoHistory.pop()
     undone = true
     if (transferAction && !transferAction.copy && transferAction.kind === 'rename') {
-      mainWindow?.webContents.send('workspace:entryRenamed', {
+      mainWindow?.webContents.send('tree:entryRenamed', {
         oldPath: transferAction.pairs[0].target,
         newPath: transferAction.pairs[0].source,
         sidecars: transferAction.pairs.slice(1).map(({ source, target }) => ({ oldPath: target, newPath: source })),
       })
     } else if (transferAction && !transferAction.copy) {
-      mainWindow?.webContents.send('workspace:entriesTransferred', {
+      mainWindow?.webContents.send('tree:entriesTransferred', {
         pairs: transferAction.pairs.map(({ source, target }) => ({ source: target, target: source })),
         copy: false,
       })
     }
-    mainWindow?.webContents.send('workspace:refresh')
+    mainWindow?.webContents.send('tree:refresh')
     } finally {
       for (const watchedPath of watcherPaths) {
         if (await exists(watchedPath) && (await fs.lstat(watchedPath)).isFile()) await watchFile(watchedPath)
@@ -930,75 +929,9 @@ function watchFolderRoot(directory: string): void {
     ignored: /(^|[\\/])(\.git|node_modules|\.tools|\.cache|\.userdata)([\\/]|$)|(^|[\\/])\.~|\.bak$|\.tmp$/,
     awaitWriteFinish: { stabilityThreshold: 200, pollInterval: 100 },
   })
-  watcher.on('all', () => mainWindow?.webContents.send('workspace:refresh'))
+  watcher.on('all', () => mainWindow?.webContents.send('tree:refresh'))
   watcher.on('error', (error) => console.error(`Ошибка наблюдения за рабочей папкой ${directory}.`, error))
   folderWatchers.set(directory, watcher)
-}
-
-async function openWorkspaceFile(): Promise<{
-  path: string
-  folders: Array<{ path: string; name?: string; entries: FileEntry[]; error: string | null }>
-  openTabs: string[]
-  activeTab: number
-} | null> {
-  if (!mainWindow) return null
-  const result = await dialog.showOpenDialog(mainWindow, {
-    properties: ['openFile'],
-    filters: [{ name: 'Workspace Annotator', extensions: ['annotator-workspace'] }],
-  })
-  if (result.canceled || !result.filePaths[0]) return null
-  const workspaceFile = path.resolve(result.filePaths[0])
-  allowedRoots.add(path.dirname(workspaceFile))
-  const workspace = parseWorkspaceFile(await fs.readFile(workspaceFile, 'utf8'))
-  await Promise.all([...folderWatchers.values()].map((watcher) => watcher.close()))
-  folderWatchers.clear()
-  const folders = await Promise.all(workspace.folders.map(async (folder) => {
-    const directory = workspacePathFromFile(workspaceFile, folder.path)
-    allowedRoots.add(directory)
-    try {
-      const stat = await fs.stat(directory)
-      if (!stat.isDirectory()) throw new Error('Путь не является папкой.')
-      watchFolderRoot(directory)
-      return { path: directory, name: folder.name, entries: await listDirectory(directory), error: null }
-    } catch (error) {
-      return {
-        path: directory,
-        name: folder.name,
-        entries: [] as FileEntry[],
-        error: error instanceof Error ? error.message : String(error),
-      }
-    }
-  }))
-  const state = workspace.state
-  return {
-    path: workspaceFile,
-    folders,
-    openTabs: state?.openTabs.map((item) => workspacePathFromFile(workspaceFile, item)) ?? [],
-    activeTab: state?.activeTab ?? 0,
-  }
-}
-
-async function saveWorkspaceFile(
-  folders: string[],
-  openTabs: string[],
-  activeTab: number,
-  settings?: Record<string, unknown>,
-): Promise<string | null> {
-  if (!mainWindow) return null
-  for (const target of [...folders, ...openTabs]) {
-    if (!isAllowedPath(target)) throw new Error(`Нельзя добавить путь вне разрешённой рабочей области: ${target}`)
-  }
-  const result = await dialog.showSaveDialog(mainWindow, {
-    defaultPath: 'workspace.annotator-workspace',
-    filters: [{ name: 'Workspace Annotator', extensions: ['annotator-workspace'] }],
-  })
-  if (result.canceled || !result.filePath) return null
-  const target = result.filePath.toLowerCase().endsWith('.annotator-workspace')
-    ? result.filePath
-    : `${result.filePath}.annotator-workspace`
-  allowedRoots.add(path.dirname(target))
-  await atomicWrite(target, Buffer.from(serializeWorkspaceFile(target, folders, openTabs, activeTab, settings), 'utf8'))
-  return target
 }
 
 async function atomicWrite(target: string, contents: Buffer): Promise<void> {
@@ -1246,7 +1179,6 @@ function registerIpc(): void {
       folders: await Promise.all(folders.map(async (directory) => ({ path: directory, entries: await listDirectory(directory) }))),
     }
   })
-  installHandler('dialog:openWorkspace', () => openWorkspaceFile())
   installHandler('dialog:importInterchange', async () => {
     if (!mainWindow) return null
     const result = await dialog.showOpenDialog(mainWindow, {
@@ -1302,7 +1234,6 @@ function registerIpc(): void {
     })
     return result.response < encodings.length ? encodings[result.response] ?? null : null
   })
-  installHandler('dialog:saveWorkspace', ({ folders, openTabs, activeTab, settings }) => saveWorkspaceFile(folders, openTabs, activeTab, settings))
   installHandler('fs:list', ({ path: directory }) => listDirectory(directory))
   installHandler('fs:create', ({ parentPath, name, kind }) => createEntry(parentPath, name, kind))
   installHandler('fs:rename', ({ path: entryPath, name }) => renameEntry(entryPath, name))

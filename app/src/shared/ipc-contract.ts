@@ -3,7 +3,6 @@ import { z } from 'zod'
 export const channelSchemas = {
   'dialog:openFile': z.void(),
   'dialog:openFolder': z.object({ add: z.boolean().default(false) }),
-  'dialog:openWorkspace': z.void(),
   'dialog:chooseEncoding': z.object({ current: z.string().min(1) }),
   'dialog:importInterchange': z.void(),
   'dialog:saveExport': z.object({
@@ -15,20 +14,14 @@ export const channelSchemas = {
     folders: z.array(z.string()),
     openTabs: z.array(z.string()),
     activeTab: z.number().int().nonnegative(),
-    lastWorkspace: z.string().nullable(),
     layout: z.object({
       explorerWidth: z.number().int().min(190).max(380),
       annotationsWidth: z.number().int().min(270).max(460),
       showExplorer: z.boolean(),
       showAnnotations: z.boolean(),
       showOutline: z.boolean(),
+      outlineHeight: z.number().int().min(130).max(1200).optional(),
     }).optional(),
-  }),
-  'dialog:saveWorkspace': z.object({
-    folders: z.array(z.string().min(1)).min(1),
-    openTabs: z.array(z.string()),
-    activeTab: z.number().int().nonnegative(),
-    settings: z.record(z.string(), z.unknown()).optional(),
   }),
   'fs:list': z.object({ path: z.string().min(1) }),
   'fs:create': z.object({
