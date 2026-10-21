@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte'
+  import { onMount, tick } from 'svelte'
   import { Compartment, EditorState, Transaction } from '@codemirror/state'
   import { history, historyKeymap } from '@codemirror/commands'
   import { defaultHighlightStyle, indentOnInput, syntaxHighlighting } from '@codemirror/language'
@@ -37,6 +37,7 @@
   }
 
   let editorHost: HTMLDivElement
+  let noteInput = $state<HTMLTextAreaElement>()
   let editor = $state<EditorView>()
   let tabs = $state<DocumentTab[]>([])
   let activeTabId = $state('')
@@ -654,7 +655,7 @@
     }
   }
 
-  function createAnnotation(): void {
+  async function createAnnotation(): Promise<void> {
     if (!editor) return
     const selection = editor.state.selection.main
     if (selection.empty) {
@@ -666,6 +667,8 @@
     noteDraft = ''
     selectedId = null
     status = 'Введите заметку и нажмите «Добавить»'
+    await tick()
+    noteInput?.focus()
   }
 
   function confirmAnnotation(): void {
@@ -836,7 +839,7 @@
       document.querySelector<HTMLInputElement>('.search-input')?.focus()
     } else if (mod && event.shiftKey && code === 'KeyA') {
       event.preventDefault()
-      createAnnotation()
+      void createAnnotation()
     } else if (!typing && event.altKey && code === 'ArrowDown') {
       event.preventDefault()
       moveAnnotation(1)
@@ -1199,7 +1202,12 @@
             <select bind:value={noteType} aria-label="Тип аннотации">
               {#each annotationTypes as type}<option value={type.id}>{type.label}</option>{/each}
             </select>
-            <textarea bind:value={noteDraft} rows="4" placeholder="Текст заметки в Markdown…"></textarea>
+            <textarea bind:this={noteInput} bind:value={noteDraft} rows="4" placeholder="Текст заметки в Markdown…" onkeydown={(event) => {
+              if (event.ctrlKey && !event.altKey && !event.metaKey && event.code === 'Enter') {
+                event.preventDefault()
+                confirmAnnotation()
+              }
+            }}></textarea>
             <div class="composer-actions"><button onclick={() => { pendingSelection = { from: 0, to: 0 }; noteDraft = '' }}>Отмена</button><button class="accent-button" onclick={confirmAnnotation}>Добавить</button></div>
           </section>
         {/if}
